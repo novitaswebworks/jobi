@@ -620,6 +620,8 @@ mod tests {
             mem.add_document_copy(1, "x", &original.to_string_lossy())
                 .is_err()
         );
+        // Windows cannot delete a database file that is still open.
+        drop(s);
         std::fs::remove_dir_all(&dir)?;
         Ok(())
     }

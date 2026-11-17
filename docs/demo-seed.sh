@@ -11,3 +11,7 @@ jobi add --company "Fjord Systems" --role "Site Reliability Engineer" --stage Wi
 jobi posting 2 --url https://example.com/careers/platform-engineer --description "Own the deploy platform. Rust and Kubernetes."
 jobi interview 2 --at "$(d 2)T15:00:00+05:30" --timezone Asia/Kolkata --kind "System design" --notes "Bring architecture diagrams"
 jobi note 2 "Recruiter confirmed a 60 minute panel"
+jobi task add 2 "Send thank-you note" --due "$(d 1)"
+jobi task add 2 "Prepare system design questions"
+jobi contact add 2 "Jane Doe" --role Recruiter --email jane@northwind.example --last-contacted today
+jobi offer set 2 --base 125000 --currency USD --bonus 10000 --deadline "$(d 10)"

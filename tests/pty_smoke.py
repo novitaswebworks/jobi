@@ -15,6 +15,8 @@ def session(cols, rows, steps, env=None, db="smoke.sqlite3"):
     """steps: bytes to type, or a signal number to send. Returns (output, exit status)."""
     pid, fd = pty.fork()
     if pid == 0:
+        # Size the terminal before the app starts, or it may read the default size.
+        fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         os.environ.update(env or {})
         os.environ["JOBI_CONFIG"] = os.path.join(TMP, "none.toml")
         os.execv(BIN, ["jobi", "--db", os.path.join(TMP, db)])

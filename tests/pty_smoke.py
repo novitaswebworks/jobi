@@ -32,13 +32,18 @@ def session(cols, rows, steps, env=None, db="smoke.sqlite3"):
                     return
                 out += chunk
 
-    drain(1.0)
+    # Wait for the first screen instead of sleeping: a slow machine would otherwise
+    # deliver Esc and the next key together, which terminals read as Alt+key.
+    deadline = time.time() + 15
+    while time.time() < deadline and not ("JOBI" in out.decode("utf8", "replace") or "Resize" in out.decode("utf8", "replace")):
+        drain(0.1)
+    drain(0.3)
     for step in steps:
         if isinstance(step, int):
             os.kill(pid, step)
         else:
             os.write(fd, step)
-        drain(0.4)
+        drain(0.6)
     status = None
     for _ in range(60):
         done, st = os.waitpid(pid, os.WNOHANG)

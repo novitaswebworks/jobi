@@ -161,6 +161,46 @@ pub fn parse_csv(path: &Path) -> Result<(Vec<ImportRow>, Vec<String>)> {
     Ok((rows, errors))
 }
 
+/// (line number, why the row was skipped)
+pub type Skipped = (u64, String);
+
+fn dup_key(company: &str, role: &str) -> String {
+    let norm = |s: &str| {
+        s.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    };
+    format!("{}\u{1f}{}", norm(company), norm(role))
+}
+
+/// Separates rows already tracked (same company and role, active or archived) or repeated
+/// earlier in the file. Returns (new rows, [(line, reason)]).
+pub fn split_duplicates(
+    store: &Store,
+    rows: Vec<ImportRow>,
+) -> Result<(Vec<ImportRow>, Vec<Skipped>)> {
+    let mut known: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for a in store.list(false)?.into_iter().chain(store.list(true)?) {
+        known.insert(
+            dup_key(&a.company, &a.role),
+            format!("already tracked as #{}", a.id),
+        );
+    }
+    let (mut fresh, mut dups) = (vec![], vec![]);
+    for r in rows {
+        let key = dup_key(&r.company, &r.role);
+        match known.get(&key) {
+            Some(why) => dups.push((r.line, why.clone())),
+            None => {
+                known.insert(key, format!("same as line {}", r.line));
+                fresh.push(r);
+            }
+        }
+    }
+    Ok((fresh, dups))
+}
+
 /// Inserts all rows in one transaction: either every row is imported or none.
 pub fn import_rows(store: &mut Store, rows: &[ImportRow]) -> Result<()> {
     let tx = store.0.transaction()?;
@@ -450,6 +490,35 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn duplicates_are_detected_against_database_and_file() -> Result<()> {
+        let mut s = mem();
+        s.save(None, "Acme", "Eng", "Applied", "", "")?;
+        let id = s.save(None, "Old", "Dev", "Applied", "", "")?;
+        s.archive(id, true)?;
+        let p = tmp("dup.csv");
+        fs::write(
+            &p,
+            "company,role\n  ACME ,eng\nOld,Dev\nNew,Role\nnew,  role\nOther,Role\n",
+        )?;
+        let (rows, errors) = parse_csv(&p)?;
+        assert!(errors.is_empty());
+        let (fresh, dups) = split_duplicates(&s, rows)?;
+        assert_eq!(
+            fresh.iter().map(|r| r.company.as_str()).collect::<Vec<_>>(),
+            ["New", "Other"]
+        );
+        assert_eq!(
+            dups,
+            [
+                (2, "already tracked as #1".to_string()),
+                (3, "already tracked as #2".to_string()),
+                (5, "same as line 4".to_string())
+            ]
+        );
+        fs::remove_file(p)?;
+        Ok(())
+    }
     #[test]
     fn csv_rejects_bad_headers() -> Result<()> {
         let p = tmp("hdr.csv");

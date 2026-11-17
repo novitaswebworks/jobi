@@ -137,6 +137,9 @@ enum Command {
         path: PathBuf,
         #[arg(long)]
         apply: bool,
+        /// Import rows even when the company and role are already tracked
+        #[arg(long)]
+        allow_duplicates: bool,
     },
     /// Write a complete JSON backup (applications, history, postings, interviews, document links)
     Backup {
@@ -361,7 +364,11 @@ fn main() -> Result<()> {
             let n = portable::export_csv(&store, &path, force)?;
             println!("Exported {n} application(s) to {}", path.display());
         }
-        Some(Command::Import { path, apply }) => {
+        Some(Command::Import {
+            path,
+            apply,
+            allow_duplicates,
+        }) => {
             let (rows, errors) = portable::parse_csv(&path)?;
             for r in rows.iter().take(10) {
                 println!("line {}: {} · {} [{}]", r.line, r.company, r.role, r.stage);
@@ -378,13 +385,26 @@ fn main() -> Result<()> {
                     errors.len()
                 );
             }
+            let (rows, dups) = if allow_duplicates {
+                (rows, vec![])
+            } else {
+                portable::split_duplicates(&store, rows)?
+            };
+            for (line, why) in &dups {
+                println!("line {line}: skipped duplicate ({why})");
+            }
             if apply {
                 portable::import_rows(&mut store, &rows)?;
-                println!("Imported {} application(s)", rows.len());
+                println!(
+                    "Imported {} application(s); skipped {} duplicate(s)",
+                    rows.len(),
+                    dups.len()
+                );
             } else {
                 println!(
-                    "{} row(s) valid. Preview only; re-run with --apply to import.",
-                    rows.len()
+                    "{} new row(s), {} duplicate(s) would be skipped. Preview only; re-run with --apply to import.",
+                    rows.len(),
+                    dups.len()
                 );
             }
         }

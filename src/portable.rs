@@ -2,6 +2,7 @@
 use crate::extras::Offer;
 use crate::store::{Store, validate_app, validate_interview};
 use anyhow::{Context, Result, bail};
+use base64::Engine;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::{fs, io::Write, path::Path};
@@ -289,6 +290,14 @@ struct ContactRec {
     notes: String,
     last_contacted: String,
 }
+/// A private document copy embedded in the backup (only with --include-documents).
+#[derive(Serialize, Deserialize)]
+struct FileRec {
+    document_id: i64,
+    name: String,
+    /// standard base64
+    data: String,
+}
 #[derive(Serialize, Deserialize)]
 struct Backup {
     format: String,
@@ -305,6 +314,8 @@ struct Backup {
     contacts: Vec<ContactRec>,
     #[serde(default)]
     offers: Vec<Offer>,
+    #[serde(default)]
+    files: Vec<FileRec>,
 }
 
 fn collect<T>(
@@ -319,9 +330,8 @@ fn collect<T>(
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-fn missing_documents(docs: &[DocumentRec]) -> Vec<String> {
-    docs.iter()
-        .filter(|d| !Path::new(&d.path).is_file())
+fn missing_documents<'a>(docs: impl Iterator<Item = &'a DocumentRec>) -> Vec<String> {
+    docs.filter(|d| !Path::new(&d.path).is_file())
         .map(|d| format!("{} ({})", d.label, d.path))
         .collect()
 }
@@ -441,18 +451,64 @@ fn read_all(store: &Store) -> Result<Backup> {
                 })
             },
         )?,
+        files: vec![],
     })
 }
 
-/// Writes a full backup; returns (applications, missing linked documents).
-pub fn backup(store: &Store, path: &Path, force: bool) -> Result<(usize, Vec<String>)> {
+/// What a backup wrote.
+pub struct BackupReport {
+    pub applications: usize,
+    /// Private document copies embedded in the file.
+    pub files: usize,
+    pub missing_documents: Vec<String>,
+}
+
+/// Writes a full backup. With `include_documents`, private copies (`attach --copy`)
+/// are embedded so a restore on another computer brings them along.
+pub fn backup(
+    store: &Store,
+    path: &Path,
+    force: bool,
+    include_documents: bool,
+) -> Result<BackupReport> {
     // One read transaction so every table comes from the same snapshot.
     store.0.execute_batch("BEGIN")?;
     let data = read_all(store);
     store.0.execute_batch("COMMIT")?;
-    let data = data?;
+    let mut data = data?;
+    if include_documents {
+        for d in data.documents.iter().filter(|d| d.managed) {
+            let Ok(bytes) = fs::read(&d.path) else {
+                continue;
+            };
+            let name = Path::new(&d.path)
+                .file_name()
+                .map_or_else(|| "document".into(), |n| n.to_string_lossy().into_owned());
+            data.files.push(FileRec {
+                document_id: d.id,
+                name,
+                data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            });
+        }
+    }
     write_new(path, &serde_json::to_vec_pretty(&data)?, force)?;
-    Ok((data.applications.len(), missing_documents(&data.documents)))
+    Ok(BackupReport {
+        applications: data.applications.len(),
+        files: data.files.len(),
+        missing_documents: missing_documents(data.documents.iter()),
+    })
+}
+
+/// Deletes files written during a restore unless the restore completed.
+struct WrittenFiles(Vec<std::path::PathBuf>, bool);
+impl Drop for WrittenFiles {
+    fn drop(&mut self) {
+        if !self.1 {
+            for f in &self.0 {
+                let _ = fs::remove_file(f);
+            }
+        }
+    }
 }
 
 /// What a restore did.
@@ -461,6 +517,8 @@ pub struct RestoreReport {
     /// Applications left out because the same company and role already exist (merge only).
     pub skipped: Vec<String>,
     pub missing_documents: Vec<String>,
+    /// Private copies written back next to the database.
+    pub files_restored: usize,
 }
 
 /// Restores a backup, all-or-nothing. Without `merge` the database must be empty and ids
@@ -548,11 +606,38 @@ pub fn restore(store: &mut Store, path: &Path, merge: bool) -> Result<RestoreRep
             )?;
         }
     }
+    let mut written = WrittenFiles(vec![], false);
     for d in &b.documents {
         if let Some(app) = parent(d.application_id, "document")? {
+            let mut doc_path = d.path.clone();
+            if let Some(f) = b.files.iter().find(|f| d.managed && f.document_id == d.id) {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&f.data)
+                    .with_context(|| format!("document #{} has damaged file data", d.id))?;
+                // Only the file name is used, so a crafted backup cannot write elsewhere.
+                let name = Path::new(&f.name)
+                    .file_name()
+                    .context("embedded document has no file name")?
+                    .to_string_lossy();
+                let db = tx.path().filter(|p| !p.is_empty());
+                let db = db.context("Restoring document copies needs an on-disk database")?;
+                let dir = Path::new(db)
+                    .parent()
+                    .unwrap_or(Path::new("."))
+                    .join("documents")
+                    .join(app.to_string());
+                fs::create_dir_all(&dir)?;
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |t| t.as_nanos());
+                let dest = dir.join(format!("{nanos}-{}-{name}", written.0.len()));
+                fs::write(&dest, bytes)?;
+                doc_path = dest.to_string_lossy().into_owned();
+                written.0.push(dest);
+            }
             tx.execute(
                 "INSERT INTO documents(id,application_id,label,path,managed) VALUES(?,?,?,?,?)",
-                params![child_id(d.id), app, d.label, d.path, d.managed],
+                params![child_id(d.id), app, d.label, doc_path, d.managed],
             )?;
         }
     }
@@ -581,10 +666,19 @@ pub fn restore(store: &mut Store, path: &Path, merge: bool) -> Result<RestoreRep
         }
     }
     tx.commit()?;
+    written.1 = true;
+    let restored_ids: std::collections::HashSet<_> =
+        b.files.iter().map(|f| f.document_id).collect();
     Ok(RestoreReport {
         restored: b.applications.len() - skipped.len(),
         skipped,
-        missing_documents: missing_documents(&b.documents),
+        // A copy that came back in the file is no longer missing.
+        missing_documents: missing_documents(
+            b.documents
+                .iter()
+                .filter(|d| !(d.managed && restored_ids.contains(&d.id))),
+        ),
+        files_restored: written.0.len(),
     })
 }
 
@@ -712,8 +806,8 @@ mod tests {
         a.add_document(id, "CV", &doc.to_string_lossy())?;
         a.archive(id, true)?;
         let p = tmp("b.json");
-        let (n, missing) = backup(&a, &p, false)?;
-        assert_eq!((n, missing.len()), (1, 0));
+        let r = backup(&a, &p, false, false)?;
+        assert_eq!((r.applications, r.missing_documents.len()), (1, 0));
         fs::remove_file(&doc)?;
         let mut b = mem();
         let r = restore(&mut b, &p, false)?;
@@ -776,7 +870,7 @@ mod tests {
     fn backup_v2_roundtrips_tasks_contacts_offers_and_reads_v1() -> Result<()> {
         let (a, id) = rich_store()?;
         let p = tmp("v2.json");
-        backup(&a, &p, false)?;
+        backup(&a, &p, false, false)?;
         assert!(fs::read_to_string(&p)?.contains("\"version\": 2"));
         let mut b = mem();
         restore(&mut b, &p, false)?;
@@ -802,7 +896,7 @@ mod tests {
         both.add_task(2, "Do thing", "")?;
         both.add_task(1, "acme task", "")?;
         let p = tmp("merge.json");
-        backup(&both, &p, false)?;
+        backup(&both, &p, false, false)?;
         let mut target = mem();
         target.save(None, "Zed", "Ops", "Applied", "", "")?; // id 1 collides with backup ids
         target.save(None, "ACME", "eng", "Applied", "", "")?; // same company and role as backup #1
@@ -828,6 +922,68 @@ mod tests {
         // Without --merge a non-empty target is still refused.
         assert!(restore(&mut target, &p, false).is_err());
         fs::remove_file(p)?;
+        Ok(())
+    }
+
+    #[test]
+    fn backup_embeds_private_copies_and_restores_them_elsewhere() -> Result<()> {
+        let base = std::env::temp_dir().join(format!("jobi-docs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let (src_dir, dst_dir) = (base.join("src"), base.join("dst"));
+        fs::create_dir_all(&src_dir)?;
+        fs::create_dir_all(&dst_dir)?;
+        let mut a = Store::open(&src_dir.join("a.sqlite3"))?;
+        let id = a.save(None, "Acme", "Eng", "Applied", "", "")?;
+        let cv = base.join("cv.pdf");
+        fs::write(&cv, "resume bytes")?;
+        a.add_document_copy(id, "CV", &cv.to_string_lossy())?;
+        a.add_document(id, "Link", &cv.to_string_lossy())?; // plain link, not embedded
+        let json = base.join("b.json");
+        let r = backup(&a, &json, false, true)?;
+        assert_eq!((r.applications, r.files), (1, 1));
+        let without = base.join("c.json");
+        assert_eq!(backup(&a, &without, false, false)?.files, 0);
+
+        // Restore on "another computer": a different database directory.
+        let mut b = Store::open(&dst_dir.join("b.sqlite3"))?;
+        let r = restore(&mut b, &json, false)?;
+        assert_eq!(r.files_restored, 1);
+        let docs = b.documents(id)?;
+        let copy = docs.iter().find(|d| d.managed).unwrap();
+        assert!(
+            Path::new(&copy.path).starts_with(dst_dir.canonicalize()?),
+            "{}",
+            copy.path
+        );
+        assert_eq!(fs::read_to_string(&copy.path)?, "resume bytes");
+        assert!(r.missing_documents.is_empty());
+
+        // A traversal attempt in the embedded name only ever uses the file name.
+        let stored = a
+            .documents(id)?
+            .into_iter()
+            .find(|d| d.managed)
+            .unwrap()
+            .path;
+        let stored_name = Path::new(&stored)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let evil = fs::read_to_string(&json)?.replace(&stored_name, "../../escape.txt");
+        fs::write(base.join("evil.json"), evil)?;
+        let mut c = Store::open(&dst_dir.join("c.sqlite3"))?;
+        restore(&mut c, &base.join("evil.json"), false)?;
+        assert!(!base.join("escape.txt").exists() && !dst_dir.join("escape.txt").exists());
+
+        // A failed restore removes the files it wrote.
+        let bad = fs::read_to_string(&json)?.replacen("\"activity\": [", "\"activity\": [{\"id\": 77, \"application_id\": 99, \"at\": \"t\", \"message\": \"m\"},", 1);
+        fs::write(base.join("bad.json"), bad)?;
+        let mut d = Store::open(&dst_dir.join("d.sqlite3"))?;
+        assert!(restore(&mut d, &base.join("bad.json"), false).is_err());
+        assert!(d.list(false)?.is_empty());
+        drop((a, b, c, d));
+        fs::remove_dir_all(&base)?;
         Ok(())
     }
 
@@ -867,7 +1023,7 @@ mod tests {
                 let id = a.save(None, &company, &role, "Applied", "", "").unwrap();
                 a.note(id, &note).unwrap();
                 let p = tmp(&format!("prop-{}.json", fastrand_name(&company, &role, &note)));
-                backup(&a, &p, true).unwrap();
+                backup(&a, &p, true, false).unwrap();
                 let mut b = mem();
                 restore(&mut b, &p, false).unwrap();
                 fs::remove_file(&p).unwrap();

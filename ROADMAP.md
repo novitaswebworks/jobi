@@ -10,13 +10,13 @@
 - [x] Automation: `status`, `notify`, `--json`, shell completions, man page, config file
 - [x] Quality: unit, UI, property and pseudo-terminal tests; CI on Linux, macOS and Windows
 - [x] MIT license, changelog, release workflow
+- [x] Private document copies can be embedded in backups (`--include-documents`)
+- [x] `notify` and `status -v` name the due actions, not just counts
 
 ## Next
 
 - [ ] Real-user feedback on the daily workflow (the most valuable input right now)
 - [ ] Manual testing on Linux and Windows terminals (CI covers tests, not feel)
-- [ ] Include private document copies in backups
-- [ ] Per-day digest in `jobi notify` (which actions, not just counts)
 - [ ] Configurable stages and keybindings
 - [ ] Re-check package and executable names on crates.io and Homebrew before publishing; add a Homebrew formula
 

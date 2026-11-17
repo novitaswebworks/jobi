@@ -117,6 +117,9 @@ enum Command {
         /// Print nothing when no action is overdue or due today
         #[arg(long)]
         quiet: bool,
+        /// Also list each overdue or due-today action
+        #[arg(long, short)]
+        verbose: bool,
     },
     /// Pipeline statistics: stage counts, progress and applications added per week
     Stats,
@@ -237,6 +240,9 @@ enum Command {
         /// Overwrite the file if it exists
         #[arg(long)]
         force: bool,
+        /// Embed private document copies (attach --copy) in the backup file
+        #[arg(long)]
+        include_documents: bool,
     },
     /// Restore a JSON backup into an empty database (or add it to existing data with --merge)
     Restore {
@@ -317,7 +323,7 @@ fn main() -> Result<()> {
             }
             _ => ui::run(&mut store, true, &config)?,
         },
-        Some(Command::Status { quiet }) => {
+        Some(Command::Status { quiet, verbose }) => {
             let rows = store.list(false)?;
             let stale = store.stale_ids(config.stale_days)?.len();
             let (line, urgent) = due_summary(&rows, stale);
@@ -325,12 +331,21 @@ fn main() -> Result<()> {
                 let (overdue, due_today) =
                     store::due_counts(&rows, &today().format("%Y-%m-%d").to_string());
                 let open = rows.iter().filter(|a| !a.action.is_empty()).count();
+                let items: Vec<_> = urgent_items(&rows)
+                    .into_iter()
+                    .map(|(a, overdue)| serde_json::json!({"id": a.id, "company": a.company, "role": a.role, "action": a.action, "due": a.due, "overdue": overdue}))
+                    .collect();
                 println!(
                     "{}",
-                    serde_json::json!({"overdue": overdue, "due_today": due_today, "open": open, "stale": stale})
+                    serde_json::json!({"overdue": overdue, "due_today": due_today, "open": open, "stale": stale, "items": items})
                 );
             } else if urgent > 0 || !quiet {
                 println!("{line}");
+                if verbose {
+                    for l in urgent_lines(&rows) {
+                        println!("  {l}");
+                    }
+                }
             }
         }
         Some(Command::Task { cmd }) => match cmd {
@@ -470,9 +485,17 @@ fn main() -> Result<()> {
         }
         Some(Command::Completions { .. } | Command::Man) => unreachable!(),
         Some(Command::Notify) => {
-            let (line, urgent) = due_summary(&store.list(false)?, 0);
+            let rows = store.list(false)?;
+            let (line, urgent) = due_summary(&rows, 0);
             if urgent > 0 {
-                notify("Jobi", &line);
+                // Notification bodies are short: the first three actions, then a count.
+                let mut lines = urgent_lines(&rows);
+                let more = lines.len().saturating_sub(3);
+                lines.truncate(3);
+                if more > 0 {
+                    lines.push(format!("+{more} more"));
+                }
+                notify("Jobi", &format!("{line}\n{}", lines.join("\n")));
             }
         }
         Some(Command::Today) => {
@@ -647,16 +670,30 @@ fn main() -> Result<()> {
                 );
             }
         }
-        Some(Command::Backup { path, force }) => {
-            let (n, missing) = portable::backup(&store, &path, force)?;
-            println!("Backed up {n} application(s) to {}", path.display());
-            report_missing(&missing);
+        Some(Command::Backup {
+            path,
+            force,
+            include_documents,
+        }) => {
+            let r = portable::backup(&store, &path, force, include_documents)?;
+            println!(
+                "Backed up {} application(s) to {}",
+                r.applications,
+                path.display()
+            );
+            if include_documents {
+                println!("Embedded {} private document cop(ies)", r.files);
+            }
+            report_missing(&r.missing_documents);
         }
         Some(Command::Restore { path, merge }) => {
             let r = portable::restore(&mut store, &path, merge)?;
             println!("Restored {} application(s)", r.restored);
             for name in &r.skipped {
                 println!("skipped (already tracked): {name}");
+            }
+            if r.files_restored > 0 {
+                println!("Restored {} private document cop(ies)", r.files_restored);
             }
             report_missing(&r.missing_documents);
         }
@@ -703,6 +740,30 @@ fn due_summary(rows: &[store::Application], stale: usize) -> (String, usize) {
     }
     (parts.join(" · "), overdue + due_today)
 }
+/// Open actions that are overdue or due today, earliest first, with whether each is overdue.
+fn urgent_items(rows: &[store::Application]) -> Vec<(&store::Application, bool)> {
+    let today = today().format("%Y-%m-%d").to_string();
+    let mut v: Vec<_> = rows
+        .iter()
+        .filter(|a| !a.action.is_empty() && !a.due.is_empty() && a.due <= today)
+        .map(|a| (a, a.due < today))
+        .collect();
+    v.sort_by(|x, y| (&x.0.due, x.0.id).cmp(&(&y.0.due, y.0.id)));
+    v
+}
+fn urgent_lines(rows: &[store::Application]) -> Vec<String> {
+    urgent_items(rows)
+        .into_iter()
+        .map(|(a, overdue)| {
+            let when = if overdue {
+                format!("overdue since {}", a.due)
+            } else {
+                "today".into()
+            };
+            format!("{}: {} ({when})", a.company, a.action)
+        })
+        .collect()
+}
 /// Desktop notification via the platform tool; falls back to printing.
 fn notify(title: &str, body: &str) {
     use std::process::Command as Proc;
@@ -742,4 +803,39 @@ fn print_rows(rows: &[store::Application], json: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn app(id: i64, action: &str, offset: i64) -> store::Application {
+        let due = (today() + chrono::Duration::days(offset))
+            .format("%Y-%m-%d")
+            .to_string();
+        store::Application {
+            id,
+            company: format!("Co{id}"),
+            role: "R".into(),
+            stage: "Applied".into(),
+            action: action.into(),
+            due,
+            archived: false,
+        }
+    }
+    #[test]
+    fn urgent_actions_are_listed_earliest_first_without_future_or_closed_ones() {
+        let rows = [
+            app(1, "Later", 3),
+            app(2, "Today", 0),
+            app(3, "Late", -2),
+            app(4, "", -5),
+        ];
+        let lines = urgent_lines(&rows);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("Co3: Late (overdue since"));
+        assert_eq!(lines[1], "Co2: Today (today)");
+        let (summary, urgent) = due_summary(&rows, 2);
+        assert_eq!(urgent, 2);
+        assert_eq!(summary, "1 overdue · 1 due today · 3 open · 2 stale");
+    }
 }

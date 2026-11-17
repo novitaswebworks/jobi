@@ -102,7 +102,8 @@ The UI needs a terminal of at least 50 columns by 18 rows. Wide terminals show t
   ```sh
   jobi status              # 1 overdue · 1 due today · 4 open
   jobi status --quiet      # prints nothing when nothing is due: handy in a shell prompt
-  jobi notify              # desktop notification when something is overdue or due today
+  jobi status -v           # also lists each overdue or due-today action
+  jobi notify              # desktop notification naming the first three due actions
   ```
 
   Run `jobi notify` from cron or launchd (`0 9 * * *`) for a daily nudge. It uses `osascript` on macOS and `notify-send` on Linux, and prints on other platforms.
@@ -143,7 +144,7 @@ jobi offers                               # compare all offers
 | `jobi` | Open the interactive app |
 | `add`, `list [--archived]`, `today` | Add and show applications |
 | `done`, `note`, `history`, `archive [--restore]` | Work on one application |
-| `status [--quiet]`, `notify` | Summary line; desktop notification |
+| `status [--quiet] [-v]`, `notify` | Summary line (optionally with the due actions); desktop notification |
 | `stats` | Stage counts, advancement rate, applications added per week |
 | `posting`, `interview`, `interviews`, `interview-edit`, `interview-remove` | Interview preparation |
 | `attach`, `documents`, `unlink` | Documents |
@@ -162,6 +163,7 @@ jobi export applications.csv            # all applications, active and archived
 jobi import applications.csv            # validate and preview; writes nothing
 jobi import applications.csv --apply    # import: all rows or none
 jobi backup jobi-backup.json            # complete backup
+jobi backup full.json --include-documents   # also embed private document copies
 jobi --db new.sqlite3 restore jobi-backup.json
 jobi restore jobi-backup.json --merge   # add a backup to the current database
 ```
@@ -170,7 +172,7 @@ jobi restore jobi-backup.json --merge   # add a backup to the current database
 
 **Backup.** A versioned JSON file (`"format": "jobi-backup"`, currently version 2; version 1 files still restore) with applications, full history, postings, interviews, document links, tasks, contacts, and offers, written from one consistent snapshot. **Restore** writes into an *empty* database and preserves ids and history timestamps. With `--merge` it adds to existing data instead: applications whose company and role already exist are skipped, and the rest get new ids with all their history and attachments. Either way it is all-or-nothing: an invalid or inconsistent file changes nothing. `export`, `backup`, and `ical` refuse to overwrite an existing file unless you pass `--force`.
 
-Documents are stored as paths. Backup and restore warn about each linked file that is missing on this computer but keep the link. Private copies live in the `documents` folder next to the database and are **not** inside the backup file: copy that folder as well. Backup files hold your job-search data in plain text; protect them like the database.
+Documents are stored as paths. Backup and restore warn about each linked file that is missing on this computer but keep the link. Private copies (`attach --copy`) live in a `documents` folder next to the database. Add `--include-documents` to embed them in the backup, base64-encoded, so a restore on another computer writes them back next to that database; without the flag they are left out and listed as missing on restore. Backup files hold your job-search data and documents in plain text; protect them like the database.
 
 ## Configuration
 
@@ -240,7 +242,7 @@ The smoke test drives the binary in a pseudo-terminal and checks that quitting, 
 Jobi is early software with a deliberately small scope.
 
 - Developed and manually tested on macOS. CI runs the test suite on Linux, macOS, and Windows, and the terminal smoke test on Linux and macOS; Windows has had no manual testing.
-- Private document copies are not part of the backup file.
+- Private document copies are only in a backup when you pass `--include-documents`, which makes the file larger.
 - Offers are compared per currency; there is no exchange-rate conversion.
 - There is no background service. Use `jobi notify` from cron or launchd for reminders.
 - Email sync, job scraping, and AI features are intentionally out of scope until the core workflow is proven.

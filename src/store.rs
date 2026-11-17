@@ -326,6 +326,53 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+    /// Moves an application to another stage and records it; returns the previous stage.
+    pub fn set_stage(&mut self, id: i64, stage: &str) -> Result<String> {
+        if !STAGES.contains(&stage) {
+            bail!("Unknown application stage '{stage}'");
+        }
+        let tx = self.0.transaction()?;
+        let old: String = tx
+            .query_row("SELECT stage FROM applications WHERE id=?", [id], |r| {
+                r.get(0)
+            })
+            .map_err(|_| anyhow::anyhow!("Application #{id} not found"))?;
+        if old != stage {
+            tx.execute(
+                "UPDATE applications SET stage=? WHERE id=?",
+                params![stage, id],
+            )?;
+            tx.execute(
+                "INSERT INTO activity(application_id,message) VALUES(?,?)",
+                params![id, format!("Stage: {old} → {stage}")],
+            )?;
+        }
+        tx.commit()?;
+        Ok(old)
+    }
+    /// Puts back an action that was just completed (used by undo). Refuses if a new
+    /// action has been set since, so nothing is overwritten.
+    pub fn reopen_action(&mut self, id: i64, action: &str, due: &str) -> Result<()> {
+        let tx = self.0.transaction()?;
+        let current: String = tx
+            .query_row("SELECT action FROM applications WHERE id=?", [id], |r| {
+                r.get(0)
+            })
+            .map_err(|_| anyhow::anyhow!("Application #{id} not found"))?;
+        if !current.is_empty() {
+            bail!("A new next action was set since; nothing was changed");
+        }
+        tx.execute(
+            "UPDATE applications SET action=?,due=? WHERE id=?",
+            params![action, due, id],
+        )?;
+        tx.execute(
+            "INSERT INTO activity(application_id,message) VALUES(?,?)",
+            params![id, format!("Reopened: {action}")],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
     pub fn archive(&mut self, id: i64, archived: bool) -> Result<()> {
         let tx = self.0.transaction()?;
         if tx.execute(
@@ -344,6 +391,16 @@ impl Store {
     }
 }
 /// Validates already-trimmed application fields; shared by save, CSV import and restore.
+/// (overdue, due today) among applications that have an open action with a due date.
+pub fn due_counts(rows: &[Application], today: &str) -> (usize, usize) {
+    let open = rows
+        .iter()
+        .filter(|a| !a.action.is_empty() && !a.due.is_empty());
+    (
+        open.clone().filter(|a| a.due.as_str() < today).count(),
+        open.filter(|a| a.due == today).count(),
+    )
+}
 pub fn validate_app(company: &str, role: &str, stage: &str, action: &str, due: &str) -> Result<()> {
     if company.is_empty() || role.is_empty() {
         bail!("Company and role are required");
@@ -483,6 +540,23 @@ mod tests {
             .expect("must refuse")
             .to_string();
         assert!(err.contains("newer Jobi"), "{err}");
+        Ok(())
+    }
+    #[test]
+    fn stage_changes_undo_and_due_counts() -> Result<()> {
+        let mut s = Store::initialize(Connection::open_in_memory()?)?;
+        let a = s.save(None, "A", "R", "Applied", "Call", "2026-11-16")?;
+        let b = s.save(None, "B", "R", "Applied", "Call", "2026-11-17")?;
+        s.save(None, "C", "R", "Applied", "Call", "2026-11-18")?;
+        s.save(None, "D", "R", "Applied", "", "")?;
+        assert_eq!(due_counts(&s.list(false)?, "2026-11-17"), (1, 1));
+        assert_eq!(s.set_stage(a, "Interview")?, "Applied");
+        assert!(s.history(a)?[0].contains("Applied → Interview"));
+        assert!(s.set_stage(a, "Nope").is_err() && s.set_stage(99, "Offer").is_err());
+        s.complete(b)?;
+        s.reopen_action(b, "Call", "2026-11-17")?;
+        assert_eq!(s.list(false)?[1].action, "Call");
+        assert!(s.reopen_action(b, "x", "").is_err()); // would overwrite an open action
         Ok(())
     }
     #[test]

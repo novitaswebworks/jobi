@@ -21,6 +21,14 @@ struct Cli {
 enum Command {
     /// Show applications with open actions, earliest due first
     Today,
+    /// One-line summary of overdue and due-today actions (for shell prompts)
+    Status {
+        /// Print nothing when no action is overdue or due today
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Send a desktop notification when actions are overdue or due today (cron-friendly)
+    Notify,
     /// List applications
     List {
         #[arg(long)]
@@ -170,6 +178,18 @@ fn main() -> Result<()> {
             }
             _ => ui::run(&mut store, true, &config)?,
         },
+        Some(Command::Status { quiet }) => {
+            let (line, urgent) = due_summary(&store.list(false)?);
+            if urgent > 0 || !quiet {
+                println!("{line}");
+            }
+        }
+        Some(Command::Notify) => {
+            let (line, urgent) = due_summary(&store.list(false)?);
+            if urgent > 0 {
+                notify("Jobi", &line);
+            }
+        }
         Some(Command::Today) => {
             let mut rows = store.list(false)?;
             ui::order_actions(&mut rows);
@@ -321,6 +341,45 @@ fn report_missing(missing: &[String]) {
         for m in missing {
             eprintln!("  {m}");
         }
+    }
+}
+/// ("2 overdue · 1 due today · 5 open", overdue + due today)
+fn due_summary(rows: &[store::Application]) -> (String, usize) {
+    let (overdue, due_today) = store::due_counts(rows, &today().format("%Y-%m-%d").to_string());
+    let open = rows.iter().filter(|a| !a.action.is_empty()).count();
+    let mut parts = vec![];
+    if overdue > 0 {
+        parts.push(format!("{overdue} overdue"));
+    }
+    if due_today > 0 {
+        parts.push(format!("{due_today} due today"));
+    }
+    if parts.is_empty() {
+        parts.push("nothing due today".into());
+    }
+    parts.push(format!("{open} open"));
+    (parts.join(" · "), overdue + due_today)
+}
+/// Desktop notification via the platform tool; falls back to printing.
+fn notify(title: &str, body: &str) {
+    use std::process::Command as Proc;
+    #[cfg(target_os = "macos")]
+    let sent = Proc::new("osascript")
+        .args([
+            "-e",
+            "on run argv",
+            "-e",
+            "display notification (item 2 of argv) with title (item 1 of argv)",
+            "-e",
+            "end run",
+            title,
+            body,
+        ])
+        .status();
+    #[cfg(not(target_os = "macos"))]
+    let sent = Proc::new("notify-send").args([title, body]).status();
+    if !matches!(sent, Ok(s) if s.success()) {
+        println!("{title}: {body}");
     }
 }
 fn print_rows(rows: &[store::Application]) {

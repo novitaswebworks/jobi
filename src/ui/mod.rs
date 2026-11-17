@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::dates::resolve_due;
-use crate::store::{Application, Interview, STAGES, Store};
+use crate::store::{Application, Interview, STAGES, Store, due_counts};
 use anyhow::{Context, Result, bail};
 use chrono::Local;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -8,12 +8,15 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
+mod draw;
+mod theme;
+use draw::draw;
 use std::{
     cell::Cell,
     io::{IsTerminal, Write},
     time::Duration,
 };
-const ACCENT: Color = Color::Cyan;
+use theme::Palette;
 
 pub fn order_actions(rows: &mut Vec<Application>) {
     rows.retain(|a| !a.action.is_empty());
@@ -57,6 +60,12 @@ impl Form {
             error: String::new(),
         }
     }
+}
+/// The inverse of the last reversible change.
+enum Undo {
+    Stage(i64, String),
+    Action(i64, String, String),
+    Archive(i64, bool),
 }
 enum Mode {
     Browse,
@@ -115,6 +124,12 @@ struct App {
     mode: Mode,
     status: String,
     config: Config,
+    pal: Palette,
+    /// open actions past due / due today across all active applications
+    overdue: usize,
+    due_today: usize,
+    /// the last reversible change, for `u`
+    undo: Option<Undo>,
     /// set by the key handler; the run loop then suspends the TUI to launch the editor
     editor: bool,
     /// largest useful details scroll, measured by the last draw
@@ -132,6 +147,8 @@ impl App {
                 .to_lowercase()
                 .contains(&q)
         });
+        let today = Local::now().date_naive().format("%Y-%m-%d").to_string();
+        (self.overdue, self.due_today) = due_counts(&store.list(false)?, &today);
         self.selected = self.selected.min(self.rows.len().saturating_sub(1));
         self.history = match self.rows.get(self.selected) {
             Some(a) => store.history(a.id)?,
@@ -160,6 +177,10 @@ pub fn run(store: &mut Store, add: bool, config: &Config) -> Result<()> {
         },
         status: "Local storage · no account required".into(),
         config: config.clone(),
+        pal: Palette::new(config),
+        overdue: 0,
+        due_today: 0,
+        undo: None,
         editor: false,
         max_scroll: Cell::new(0),
     };
@@ -389,6 +410,7 @@ fn handle(app: &mut App, store: &mut Store, key: KeyEvent) -> Result<bool> {
         Mode::Archive(id, state) => match key.code {
             KeyCode::Char('y') => {
                 store.archive(*id, *state)?;
+                app.undo = Some(Undo::Archive(*id, !*state));
                 app.mode = Mode::Browse;
                 app.status = "Archive status updated".into();
             }
@@ -432,7 +454,9 @@ fn handle(app: &mut App, store: &mut Store, key: KeyEvent) -> Result<bool> {
             }
             KeyCode::Char('x') => {
                 if let Some(a) = app.rows.get(app.selected) {
+                    let prior = Undo::Action(a.id, a.action.clone(), a.due.clone());
                     store.complete(a.id)?;
+                    app.undo = Some(prior);
                     app.status = "Action completed · press e to set the next one".into();
                     app.scroll = 0;
                 }
@@ -471,337 +495,40 @@ fn handle(app: &mut App, store: &mut Store, key: KeyEvent) -> Result<bool> {
                 )
             }
             KeyCode::Char('v') if !app.rows.is_empty() => app.mode = Mode::Inspect(app.selected, 0),
+            KeyCode::Char(c @ ('s' | 'S')) => {
+                if let Some(a) = app.rows.get(app.selected) {
+                    let i = STAGES.iter().position(|x| *x == a.stage).unwrap_or(0);
+                    let next = if c == 's' { i + 1 } else { i.wrapping_sub(1) };
+                    match STAGES.get(next) {
+                        Some(stage) => {
+                            let old = store.set_stage(a.id, stage)?;
+                            app.undo = Some(Undo::Stage(a.id, old));
+                            app.status = format!("Stage → {stage} · u to undo");
+                        }
+                        None => app.status = "No further stage in that direction".into(),
+                    }
+                }
+            }
+            KeyCode::Char('u') => match app.undo.take() {
+                Some(Undo::Stage(id, stage)) => {
+                    store.set_stage(id, &stage)?;
+                    app.status = format!("Undone · stage back to {stage}");
+                }
+                Some(Undo::Action(id, action, due)) => {
+                    store.reopen_action(id, &action, &due)?;
+                    app.status = "Undone · action reopened".into();
+                }
+                Some(Undo::Archive(id, to)) => {
+                    store.archive(id, to)?;
+                    app.status = "Undone · archive status restored".into();
+                }
+                None => app.status = "Nothing to undo".into(),
+            },
             KeyCode::Char('?') => app.mode = Mode::Help,
             _ => {}
         },
     }
     Ok(false)
-}
-fn draw(f: &mut Frame, app: &App, store: &Store) {
-    let area = f.area();
-    if area.width < 50 || area.height < 18 {
-        f.render_widget(
-            Paragraph::new(
-                "Jobi needs at least 50 columns × 18 rows.\nResize the terminal. Ctrl+C exits.",
-            ),
-            area,
-        );
-        return;
-    }
-    let parts = Layout::vertical([
-        Constraint::Length(3),
-        Constraint::Min(1),
-        Constraint::Length(3),
-    ])
-    .split(area);
-    let names = ["1 Today", "2 Applications", "3 Archived"];
-    let mut spans = vec![Span::styled(" JOBI  ", Style::default().fg(ACCENT).bold())];
-    for (i, n) in names.iter().enumerate() {
-        spans.push(Span::styled(
-            format!(" {n} "),
-            if app.tab == i {
-                Style::default().fg(Color::Black).bg(ACCENT).bold()
-            } else {
-                Style::default().fg(Color::Gray)
-            },
-        ));
-    }
-    f.render_widget(
-        Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::BOTTOM)),
-        parts[0],
-    );
-    let panes = if area.width >= 100 {
-        Layout::horizontal([Constraint::Percentage(48), Constraint::Percentage(52)]).split(parts[1])
-    } else {
-        Layout::vertical([Constraint::Percentage(45), Constraint::Percentage(55)]).split(parts[1])
-    };
-    let today = Local::now().date_naive().format("%Y-%m-%d").to_string();
-    let items: Vec<ListItem> = app
-        .rows
-        .iter()
-        .map(|a| {
-            let due = if a.due.is_empty() {
-                "No due date".into()
-            } else if a.due < today {
-                format!("OVERDUE {}", a.due)
-            } else if a.due == today {
-                "TODAY".into()
-            } else {
-                a.due.clone()
-            };
-            ListItem::new(vec![
-                Line::from(format!("{} · {}", a.company, a.role)),
-                Line::from(Span::styled(
-                    format!("{}  |  {due}", a.stage),
-                    Style::default().fg(if !a.due.is_empty() && a.due <= today {
-                        Color::Yellow
-                    } else {
-                        Color::DarkGray
-                    }),
-                )),
-            ])
-        })
-        .collect();
-    let title = format!(
-        " {} records · / {}{} ",
-        app.rows.len(),
-        app.query,
-        if matches!(app.mode, Mode::Search) {
-            "▏"
-        } else {
-            ""
-        }
-    );
-    if items.is_empty() {
-        f.render_widget(Paragraph::new(if app.query.is_empty(){"Nothing here yet.\n\n[a] Add an application\n[2] Browse all applications\n\nToday shows open actions, with overdue and upcoming dates first."}else{"No matching applications. Esc clears search."}).wrap(Wrap{trim:false}).block(Block::bordered().title(title)),panes[0]);
-    } else {
-        let mut state = ListState::default().with_selected(Some(app.selected));
-        f.render_stateful_widget(
-            List::new(items)
-                .block(Block::bordered().title(title))
-                .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
-                .highlight_symbol("▌ "),
-            panes[0],
-            &mut state,
-        );
-    }
-    let detail = if let Some(a) = app.rows.get(app.selected) {
-        format!(
-            "{}\n{}\n\nStage: {}\nNext action: {}\nDue: {}\n\n[p] Posting · [i] Interview · [d] Link document · [v] View details\n\nACTIVITY · newest first\n{}",
-            a.company,
-            a.role,
-            a.stage,
-            if a.action.is_empty() {
-                "None — press e to add one"
-            } else {
-                &a.action
-            },
-            if a.due.is_empty() { "Not set" } else { &a.due },
-            app.history.join("\n\n")
-        )
-    } else {
-        "Your next career move, one action at a time.\n\nEverything stays on this computer.\nPress ? for keyboard help.".into()
-    };
-    let details = Paragraph::new(detail).wrap(Wrap { trim: false });
-    let inner = Block::bordered().inner(panes[1]);
-    let total = u16::try_from(details.line_count(inner.width)).unwrap_or(u16::MAX);
-    let max_scroll = total.saturating_sub(inner.height);
-    app.max_scroll.set(max_scroll);
-    f.render_widget(
-        details
-            .scroll((app.scroll.min(max_scroll), 0))
-            .block(Block::bordered().title(if max_scroll > 0 {
-                " Details & history · PgUp/PgDn scroll "
-            } else {
-                " Details & history "
-            })),
-        panes[1],
-    );
-    f.render_widget(
-        Paragraph::new(format!(
-            "a Add · e Edit · n Note · x Done · z Archive/restore · ? Help · q Quit\n{}",
-            app.status
-        ))
-        .style(Style::default().fg(ACCENT)),
-        parts[2],
-    );
-    match &app.mode {
-        Mode::Form(form) => {
-            let r = popup(f, 70, 17);
-            let labels = [
-                "Company *",
-                "Role *",
-                "Stage ←/→",
-                "Next action",
-                "Due (2026-12-01, tomorrow, +3d, fri)",
-            ];
-            let mut lines = vec![
-                Line::from(Span::styled(
-                    if form.id.is_some() {
-                        "Edit application"
-                    } else {
-                        "New application"
-                    },
-                    Style::default().bold().fg(ACCENT),
-                )),
-                Line::from(""),
-            ];
-            for (i, label) in labels.iter().enumerate() {
-                lines.push(Line::from(Span::styled(
-                    format!(
-                        "{label}: {}{}",
-                        form.values[i],
-                        if form.field == i { " ▏" } else { "" }
-                    ),
-                    if form.field == i {
-                        Style::default().fg(ACCENT).bold()
-                    } else {
-                        Style::default()
-                    },
-                )));
-                lines.push(Line::from(""));
-            }
-            lines.push(Line::from(
-                "Tab/↑/↓ Field · ←/→ Stage · Enter Save · Esc Cancel",
-            ));
-            lines.push(Line::from(Span::styled(
-                &form.error,
-                Style::default().fg(Color::Red),
-            )));
-            f.render_widget(
-                Paragraph::new(lines)
-                    .block(Block::bordered().title(" Jobi "))
-                    .wrap(Wrap { trim: false }),
-                r,
-            );
-        }
-        Mode::Note(text) => {
-            let r = popup(f, 70, 8);
-            f.render_widget(
-                Paragraph::new(format!("{text}▏\n\nEnter Save · Esc Cancel"))
-                    .wrap(Wrap { trim: false })
-                    .block(Block::bordered().title(" Add a note ")),
-                r,
-            );
-        }
-        Mode::Help => {
-            let r = popup(f, 70, 16);
-            f.render_widget(
-                Paragraph::new(
-                    "1/2/3, Tab  Switch views\nj/k, ↑/↓    Select application\n/           Search (Esc clears)\na / e       Add / edit application\nn           Add a dated note\nx           Complete next action\nz           Archive / restore\np / i / d   Posting / interview / link document\nv           Details: j/k select, e edit interview,\n            r remove interview / unlink document\nCtrl+E      In a form: edit long text in $EDITOR\nPgUp/PgDn   Scroll details and history\nq, Ctrl+C   Exit\nAny key closes. History times are UTC.",
-                )
-                .block(Block::bordered().title(" Keyboard help ")),
-                r,
-            );
-        }
-        Mode::Prepare(kind, fields, field, error, _) => {
-            let (title, labels) = match *kind {
-                0 => (
-                    "Job posting",
-                    vec!["URL", "Description (Ctrl+E opens your editor)"],
-                ),
-                1 | 3 => (
-                    if *kind == 3 {
-                        "Edit interview"
-                    } else {
-                        "Schedule interview"
-                    },
-                    vec![
-                        "Starts at RFC3339 e.g. 2026-11-20T14:00:00+05:30",
-                        "Timezone",
-                        "Interview type",
-                        "Meeting URL",
-                        "Notes (Ctrl+E opens your editor)",
-                    ],
-                ),
-                _ => ("Link document", vec!["Label", "Existing file path"]),
-            };
-            let r = popup(f, 76, 18);
-            let mut lines = vec![Line::from("Tab changes fields · Enter saves · Esc cancels")];
-            for (i, label) in labels.iter().enumerate() {
-                lines.push(Line::from(format!(
-                    "{label}: {}{}",
-                    fields[i].replace('\n', " ⏎ "),
-                    if *field == i { " ▏" } else { "" }
-                )));
-                lines.push(Line::from(""));
-            }
-            lines.push(Line::from(Span::styled(
-                error,
-                Style::default().fg(Color::Red),
-            )));
-            f.render_widget(
-                Paragraph::new(lines)
-                    .wrap(Wrap { trim: false })
-                    .block(Block::bordered().title(title)),
-                r,
-            );
-        }
-        Mode::Inspect(index, sel) => {
-            let r = popup(f, 76, 24);
-            if let Some(a) = app.rows.get(*index) {
-                let posting = store.posting(a.id).unwrap_or_default();
-                let ivs = store.interviews(a.id).unwrap_or_default();
-                let docs = store.documents(a.id).unwrap_or_default();
-                let mark = |n: usize| if n == *sel { "▌ " } else { "  " };
-                let mut c = format!("{} · {}\n\nJOB POSTING\n{}\n", a.company, a.role, posting.0);
-                let desc: Vec<&str> = posting.1.lines().collect();
-                c += &desc.iter().take(4).copied().collect::<Vec<_>>().join("\n");
-                if desc.len() > 4 {
-                    c += "\n…";
-                }
-                c += "\n\nINTERVIEWS\n";
-                if ivs.is_empty() {
-                    c += "  none\n";
-                }
-                for (n, i) in ivs.iter().enumerate() {
-                    c += &format!(
-                        "{}{} {} {}\n    {} {}\n",
-                        mark(n),
-                        i.starts_at,
-                        i.timezone,
-                        i.kind,
-                        i.url,
-                        i.notes.replace('\n', " ⏎ ")
-                    );
-                }
-                c += "\nDOCUMENTS\n";
-                if docs.is_empty() {
-                    c += "  none\n";
-                }
-                for (n, d) in docs.iter().enumerate() {
-                    c += &format!(
-                        "{}{}  {}{}\n",
-                        mark(ivs.len() + n),
-                        d.label,
-                        d.path,
-                        if d.missing() { "  (FILE MISSING)" } else { "" }
-                    );
-                }
-                c += "\nj/k select · e edit interview · r remove/unlink · Esc close";
-                f.render_widget(
-                    Paragraph::new(c)
-                        .wrap(Wrap { trim: false })
-                        .block(Block::bordered().title("Application details")),
-                    r,
-                );
-            }
-        }
-        Mode::Remove(is_interview, _, label) => {
-            let r = popup(f, 60, 7);
-            f.render_widget(
-                Paragraph::new(format!(
-                    "{} {label}?\n{}\n\ny Confirm · n / Esc Cancel",
-                    if *is_interview {
-                        "Remove interview"
-                    } else {
-                        "Unlink document"
-                    },
-                    if *is_interview {
-                        "This cannot be undone."
-                    } else {
-                        "The file itself is not deleted."
-                    },
-                ))
-                .wrap(Wrap { trim: false })
-                .block(Block::bordered().title(" Confirm ")),
-                r,
-            );
-        }
-        Mode::Archive(_, state) => {
-            let r = popup(f, 60, 6);
-            f.render_widget(Paragraph::new(format!("{} this application?\nHistory will be preserved.\n\ny Confirm · n / Esc Cancel",if *state{"Archive"}else{"Restore"})).block(Block::bordered().title(" Confirm ")),r);
-        }
-        _ => {}
-    }
-}
-fn popup(f: &mut Frame, width: u16, height: u16) -> Rect {
-    let a = f.area();
-    let w = width.min(a.width);
-    let h = height.min(a.height);
-    let r = Rect::new((a.width - w) / 2, (a.height - h) / 2, w, h);
-    f.render_widget(Clear, r);
-    r
 }
 #[cfg(test)]
 mod tests {
@@ -842,6 +569,10 @@ mod tests {
                 mode: Mode::Browse,
                 status: String::new(),
                 config: Config::default(),
+                pal: Palette::new(&Config::default()),
+                overdue: 0,
+                due_today: 0,
+                undo: None,
                 editor: false,
                 max_scroll: Cell::new(0),
             };
@@ -908,6 +639,10 @@ mod tests {
             mode: Mode::Browse,
             status: String::new(),
             config: Config::default(),
+            pal: Palette::new(&Config::default()),
+            overdue: 0,
+            due_today: 0,
+            undo: None,
             editor: false,
             max_scroll: Cell::new(0),
         };
@@ -949,6 +684,142 @@ mod tests {
             KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
         )?;
         assert!(store.interviews(id)?.is_empty());
+        Ok(())
+    }
+    fn text(t: &Terminal<ratatui::backend::TestBackend>) -> String {
+        t.backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+    #[test]
+    fn today_groups_header_counts_stage_keys_and_undo() -> Result<()> {
+        use ratatui::backend::TestBackend;
+        let mut store = Store::initialize(rusqlite::Connection::open_in_memory()?)?;
+        let today = Local::now().date_naive();
+        let fmt = |d: i64| {
+            (today + chrono::Duration::days(d))
+                .format("%Y-%m-%d")
+                .to_string()
+        };
+        store.save(None, "Late", "R", "Applied", "Call", &fmt(-2))?;
+        store.save(None, "Now", "R", "Screening", "Call", &fmt(0))?;
+        store.save(None, "Soon", "R", "Offer", "Call", &fmt(3))?;
+        store.save(None, "Far", "R", "Rejected", "Call", &fmt(40))?;
+        for theme in ["dark", "light", "mono"] {
+            let config = Config::parse(&format!("theme = \"{theme}\""))?;
+            let mut app = App {
+                tab: 0,
+                query: String::new(),
+                selected: 0,
+                rows: vec![],
+                history: vec![],
+                scroll: 0,
+                mode: Mode::Browse,
+                status: String::new(),
+                config: config.clone(),
+                pal: Palette::new(&config),
+                overdue: 0,
+                due_today: 0,
+                undo: None,
+                editor: false,
+                max_scroll: Cell::new(0),
+            };
+            app.refresh(&store)?;
+            assert_eq!((app.overdue, app.due_today), (1, 1));
+            let mut t = Terminal::new(TestBackend::new(110, 34))?;
+            t.draw(|f| draw(f, &app, &store))?;
+            let out = text(&t);
+            for want in [
+                "1 overdue",
+                "1 due today",
+                "Overdue",
+                "This week",
+                "Later",
+                "[Applied]",
+            ] {
+                assert!(out.contains(want), "{theme}: missing {want}");
+            }
+            if theme == "mono" {
+                // No colour anywhere: only modifiers.
+                assert!(
+                    t.backend()
+                        .buffer()
+                        .content
+                        .iter()
+                        .all(|c| c.fg == Color::Reset && c.bg == Color::Reset
+                            || c.modifier.contains(Modifier::REVERSED))
+                );
+            }
+        }
+        // s moves the selected application forward, u puts it back.
+        let config = Config::default();
+        let mut app = App {
+            tab: 0,
+            query: String::new(),
+            selected: 0,
+            rows: vec![],
+            history: vec![],
+            scroll: 0,
+            mode: Mode::Browse,
+            status: String::new(),
+            config: config.clone(),
+            pal: Palette::new(&config),
+            overdue: 0,
+            due_today: 0,
+            undo: None,
+            editor: false,
+            max_scroll: Cell::new(0),
+        };
+        app.refresh(&store)?;
+        let id = app.rows[0].id;
+        handle(&mut app, &mut store, key('s'))?;
+        assert_eq!(
+            store
+                .list(false)?
+                .iter()
+                .find(|a| a.id == id)
+                .unwrap()
+                .stage,
+            "Screening"
+        );
+        handle(&mut app, &mut store, key('u'))?;
+        assert_eq!(
+            store
+                .list(false)?
+                .iter()
+                .find(|a| a.id == id)
+                .unwrap()
+                .stage,
+            "Applied"
+        );
+        handle(&mut app, &mut store, key('x'))?;
+        assert!(
+            store
+                .list(false)?
+                .iter()
+                .find(|a| a.id == id)
+                .unwrap()
+                .action
+                .is_empty()
+        );
+        handle(&mut app, &mut store, key('u'))?;
+        assert_eq!(
+            store
+                .list(false)?
+                .iter()
+                .find(|a| a.id == id)
+                .unwrap()
+                .action,
+            "Call"
+        );
+        handle(&mut app, &mut store, key('u'))?;
+        assert_eq!(app.status, "Nothing to undo");
         Ok(())
     }
 }

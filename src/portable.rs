@@ -950,8 +950,13 @@ mod tests {
         assert_eq!(r.files_restored, 1);
         let docs = b.documents(id)?;
         let copy = docs.iter().find(|d| d.managed).unwrap();
+        // Compare path components: temp dirs differ in spelling across platforms (8.3 names, /private).
+        let parts: Vec<_> = Path::new(&copy.path)
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
         assert!(
-            Path::new(&copy.path).starts_with(dst_dir.canonicalize()?),
+            parts.iter().any(|p| p == "dst") && !parts.iter().any(|p| p == "src"),
             "{}",
             copy.path
         );

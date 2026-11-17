@@ -830,4 +830,58 @@ mod tests {
         fs::remove_file(p)?;
         Ok(())
     }
+
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+
+        // Printable text plus the awkward characters CSV and JSON must survive.
+        fn text() -> impl Strategy<Value = String> {
+            "[a-zA-Z0-9 ,;:\"'\\\\\n\t\u{e9}\u{4e2d}\u{1f600}-]{0,40}"
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(48))]
+
+            #[test]
+            fn csv_roundtrip_preserves_fields(company in text(), role in text(), desc in text()) {
+                prop_assume!(!company.trim().is_empty() && !role.trim().is_empty());
+                let mut a = mem();
+                let id = a.save(None, &company, &role, "Applied", "", "").unwrap();
+                a.save_posting(id, "https://x", &desc).unwrap();
+                let p = tmp(&format!("prop-{}.csv", fastrand_name(&company, &role, &desc)));
+                export_csv(&a, &p, true).unwrap();
+                let (rows, errors) = parse_csv(&p).unwrap();
+                fs::remove_file(&p).unwrap();
+                prop_assert!(errors.is_empty(), "{errors:?}");
+                prop_assert_eq!(rows.len(), 1);
+                prop_assert_eq!(&rows[0].company, company.trim());
+                prop_assert_eq!(&rows[0].role, role.trim());
+                prop_assert_eq!(&rows[0].description, desc.trim());
+            }
+
+            #[test]
+            fn backup_roundtrip_preserves_history_text(company in text(), role in text(), note in text()) {
+                prop_assume!(!company.trim().is_empty() && !role.trim().is_empty() && !note.trim().is_empty());
+                let mut a = mem();
+                let id = a.save(None, &company, &role, "Applied", "", "").unwrap();
+                a.note(id, &note).unwrap();
+                let p = tmp(&format!("prop-{}.json", fastrand_name(&company, &role, &note)));
+                backup(&a, &p, true).unwrap();
+                let mut b = mem();
+                restore(&mut b, &p, false).unwrap();
+                fs::remove_file(&p).unwrap();
+                prop_assert_eq!(b.history(id).unwrap(), a.history(id).unwrap());
+                prop_assert_eq!(b.list(false).unwrap()[0].company.clone(), company.trim().to_string());
+            }
+        }
+
+        /// A file name unique to these inputs, so parallel cases never share a file.
+        fn fastrand_name(a: &str, b: &str, c: &str) -> u64 {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (a, b, c, std::thread::current().id()).hash(&mut h);
+            h.finish()
+        }
+    }
 }

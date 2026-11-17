@@ -209,7 +209,7 @@ fn edit_externally(text: &str) -> Result<String> {
         .iter()
         .filter_map(|k| std::env::var(k).ok())
         .find(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "vi".into());
+        .unwrap_or_else(|| if cfg!(windows) { "notepad" } else { "vi" }.into());
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
@@ -219,11 +219,17 @@ fn edit_externally(text: &str) -> Result<String> {
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
     opts.open(&path)?.write_all(text.as_bytes())?;
+    #[cfg(unix)]
     let status = std::process::Command::new("sh")
         .arg("-c")
         .arg(format!("{cmd} \"$1\""))
         .arg("jobi-editor")
         .arg(&path)
+        .status();
+    #[cfg(windows)]
+    let status = std::process::Command::new("cmd")
+        .arg("/C")
+        .arg(format!("{cmd} \"{}\"", path.display()))
         .status();
     let out = std::fs::read_to_string(&path);
     let _ = std::fs::remove_file(&path);

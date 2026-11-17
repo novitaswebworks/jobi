@@ -31,14 +31,16 @@ pub fn resolve_due(input: &str, today: NaiveDate) -> Result<String> {
         "tomorrow" | "tom" => today + Duration::days(1),
         _ => {
             if let Some(rest) = s.strip_prefix('+') {
-                let (n, unit) = rest.split_at(rest.len().saturating_sub(1));
+                // Split on a character boundary: the input is free text, possibly non-ASCII.
+                let unit = rest.chars().last().unwrap_or(' ');
+                let n = &rest[..rest.len() - unit.len_utf8().min(rest.len())];
                 let n: i64 = n.parse().map_err(|_| anyhow::anyhow!(HELP))?;
                 if !(0..=3650).contains(&n) {
                     bail!("Offset out of range (0-3650). {HELP}");
                 }
                 match unit {
-                    "d" => today + Duration::days(n),
-                    "w" => today + Duration::days(n * 7),
+                    'd' => today + Duration::days(n),
+                    'w' => today + Duration::days(n * 7),
                     _ => bail!(HELP),
                 }
             } else if let Some(wd) = weekday(&s) {
@@ -70,8 +72,30 @@ mod tests {
         assert_eq!(r("wednesday"), "2026-11-25"); // same weekday means next week
         assert_eq!(r("mon"), "2026-11-23");
         assert_eq!(r("2026-12-31"), "2026-12-31");
-        for bad in ["2026-02-30", "soon", "+x", "+3m", "+99999d", "2026-1-1"] {
+        for bad in [
+            "2026-02-30",
+            "soon",
+            "+x",
+            "+3m",
+            "+99999d",
+            "2026-1-1",
+            "+é",
+            "+3é",
+            "+",
+            "+ࡥ",
+        ] {
             assert!(resolve_due(bad, wed).is_err(), "{bad}");
+        }
+    }
+
+    proptest::proptest! {
+        // Whatever the user types, resolving never panics and yields "" or a real date.
+        #[test]
+        fn resolve_never_panics_and_returns_valid_dates(input in "\\PC{0,12}") {
+            let today = NaiveDate::from_ymd_opt(2026, 11, 17).unwrap();
+            if let Ok(out) = resolve_due(&input, today) {
+                proptest::prop_assert!(out.is_empty() || validate_due(&out).is_ok());
+            }
         }
     }
 }

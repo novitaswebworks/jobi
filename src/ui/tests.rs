@@ -51,6 +51,7 @@ fn layouts_and_form_render_at_supported_sizes() -> Result<()> {
     }
     Ok(())
 }
+#[cfg(unix)]
 #[test]
 fn external_editor_roundtrip_and_failure() {
     // Only this test touches VISUAL, so setting it here cannot race other tests.

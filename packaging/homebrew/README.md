@@ -29,5 +29,5 @@ archive hash is `curl -L https://github.com/novitaswebworks/jobi/archive/refs/ta
 copy the file to the tap, and push. Check with `brew audit --strict --formula novitaswebworks/tap/jobi`,
 `brew reinstall novitaswebworks/tap/jobi` and `brew test jobi`.
 
-v0.2.0 shipped prebuilt binaries for macOS arm64 and Linux x86_64 only, so macOS Intel and Linux arm64 build
-from source. From the next release the workflow also builds macOS x86_64; add an `on_intel` URL for it.
+Since v0.3.0 the release has prebuilt binaries for macOS arm64, macOS x86_64 and Linux x86_64; only Linux arm64
+builds from source.

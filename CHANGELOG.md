@@ -21,7 +21,7 @@ All notable changes to Jobi are recorded here. The format follows
 - Release archives for macOS x86_64, and a LICENSE file inside every archive. The Linux archive
   is now built on Ubuntu 22.04 so it runs on older distributions.
 - The Homebrew formula installs prebuilt release binaries (about 4 MB, no dependencies) on
-  Apple silicon and Linux x86_64, and builds from source elsewhere.
+  Apple silicon, Intel Macs and Linux x86_64, and builds from source on Linux arm64.
 
 ## [0.2.0] - 2026-11-17
 

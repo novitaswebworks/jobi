@@ -22,7 +22,7 @@ const BACKUP_FORMAT: &str = "jobi-backup";
 const BACKUP_VERSION: u32 = 2;
 
 /// Writes `data` to a new file; refuses to replace an existing one without `force`.
-fn write_new(path: &Path, data: &[u8], force: bool) -> Result<()> {
+pub(crate) fn write_new(path: &Path, data: &[u8], force: bool) -> Result<()> {
     let mut opts = fs::OpenOptions::new();
     opts.write(true);
     if force {

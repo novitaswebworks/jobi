@@ -138,7 +138,14 @@ fn spec(kind: usize) -> (&'static str, &'static [&'static str]) {
                 NOTES,
             ],
         ),
-        2 => ("Link document", &["Label", "Existing file path"]),
+        2 => (
+            "Link document",
+            &[
+                "Label",
+                "Existing file path",
+                "Keep a private copy in Jobi (yes/no)",
+            ],
+        ),
         4 => (
             "Offer",
             &[

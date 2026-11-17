@@ -129,6 +129,9 @@ pub(super) fn handle(app: &mut App, store: &mut Store, key: KeyEvent) -> Result<
                         })(),
                         6 => resolve_due(&fields[1], today())
                             .and_then(|due| store.add_task(id, &fields[0], &due)),
+                        _ if fields[2].trim().to_lowercase().starts_with('y') => {
+                            store.add_document_copy(id, &fields[0], &fields[1])
+                        }
                         _ => store.add_document(id, &fields[0], &fields[1]),
                     };
                     match res {
@@ -313,7 +316,7 @@ pub(super) fn handle(app: &mut App, store: &mut Store, key: KeyEvent) -> Result<
             KeyCode::Char('d') if !app.rows.is_empty() => {
                 app.mode = Mode::Prepare(
                     2,
-                    vec![String::new(), String::new()],
+                    vec![String::new(), String::new(), "no".into()],
                     0,
                     String::new(),
                     None,

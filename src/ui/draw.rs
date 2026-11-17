@@ -497,7 +497,10 @@ pub(super) fn draw(f: &mut Frame, app: &App, store: &Store) {
             let r = popup(f, 60, 7);
             let (verb, note) = match kind {
                 RemoveKind::Interview => ("Remove interview", "This cannot be undone."),
-                RemoveKind::Document => ("Unlink document", "The file itself is not deleted."),
+                RemoveKind::Document => (
+                    "Unlink document",
+                    "Your own file is never deleted; a copy made by Jobi is.",
+                ),
                 RemoveKind::Task => ("Delete task", "This cannot be undone."),
                 RemoveKind::Contact => ("Delete contact", "This cannot be undone."),
             };

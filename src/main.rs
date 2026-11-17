@@ -1,6 +1,7 @@
 mod config;
 mod dates;
 mod extras;
+mod ical;
 mod portable;
 mod stats;
 mod store;
@@ -208,6 +209,9 @@ enum Command {
         path: PathBuf,
         #[arg(long)]
         label: Option<String>,
+        /// Keep a private copy in Jobi's storage instead of linking your file
+        #[arg(long)]
+        copy: bool,
     },
     /// List documents linked to an application
     Documents { id: i64 },
@@ -240,6 +244,16 @@ enum Command {
         /// Add to the current database, skipping applications whose company and role already exist
         #[arg(long)]
         merge: bool,
+    },
+    /// Export interviews (and with --actions, next-action due dates) to an .ics calendar file
+    Ical {
+        path: PathBuf,
+        /// Also add each open next action as an all-day event
+        #[arg(long)]
+        actions: bool,
+        /// Overwrite the file if it exists
+        #[arg(long)]
+        force: bool,
     },
     /// Print the database location
     Path,
@@ -509,22 +523,32 @@ fn main() -> Result<()> {
             store.add_interview(id, &at, &timezone, &kind, &url, &notes)?;
             println!("Interview scheduled for #{id}");
         }
-        Some(Command::Attach { id, path, label }) => {
+        Some(Command::Attach {
+            id,
+            path,
+            label,
+            copy,
+        }) => {
             let label = label.unwrap_or_else(|| {
                 path.file_name()
                     .unwrap_or_default()
                     .to_string_lossy()
                     .into_owned()
             });
-            store.add_document(id, &label, &path.to_string_lossy())?;
-            println!("Document linked to #{id}");
+            if copy {
+                store.add_document_copy(id, &label, &path.to_string_lossy())?;
+                println!("Document copied into Jobi's storage for #{id}");
+            } else {
+                store.add_document(id, &label, &path.to_string_lossy())?;
+                println!("Document linked to #{id}");
+            }
         }
         Some(Command::Documents { id }) => {
             let docs = store.documents(id)?;
             if cli.json {
                 let v: Vec<_> = docs
                     .iter()
-                    .map(|d| serde_json::json!({"id": d.id, "label": d.label, "path": d.path, "missing": d.missing()}))
+                    .map(|d| serde_json::json!({"id": d.id, "label": d.label, "path": d.path, "missing": d.missing(), "managed": d.managed}))
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&v)?);
             }
@@ -635,6 +659,14 @@ fn main() -> Result<()> {
                 println!("skipped (already tracked): {name}");
             }
             report_missing(&r.missing_documents);
+        }
+        Some(Command::Ical {
+            path,
+            actions,
+            force,
+        }) => {
+            let n = ical::export(&store, &path, actions, force)?;
+            println!("Exported {n} calendar event(s) to {}", path.display());
         }
         Some(Command::Path) => unreachable!(),
     }

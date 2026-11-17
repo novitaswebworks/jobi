@@ -93,6 +93,8 @@ pub struct Document {
     pub id: i64,
     pub label: String,
     pub path: String,
+    /// A copy kept in Jobi's own storage (deleted when unlinked), not a link to your file.
+    pub managed: bool,
 }
 impl Document {
     /// Documents are linked by path, so the file may have moved or been deleted.
@@ -165,23 +167,71 @@ impl Store {
         )?;
         Ok(())
     }
-    pub fn documents(&self, id: i64) -> Result<Vec<Document>> {
-        let mut q = self
+    /// Copies the file into Jobi's storage next to the database and links the copy,
+    /// so it survives the original being moved or deleted.
+    pub fn add_document_copy(&self, id: i64, label: &str, src: &str) -> Result<()> {
+        self.require_app(id)?;
+        let src = Path::new(src)
+            .canonicalize()
+            .context("Document path does not exist")?;
+        if !src.is_file() {
+            bail!("Document must be a file");
+        }
+        let db = self
             .0
-            .prepare("SELECT id,label,path FROM documents WHERE application_id=? ORDER BY id")?;
+            .path()
+            .filter(|p| !p.is_empty())
+            .context("Managed copies need an on-disk database")?;
+        let dir = Path::new(db)
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("documents")
+            .join(id.to_string());
+        std::fs::create_dir_all(&dir)?;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let name = src.file_name().unwrap_or_default().to_string_lossy();
+        let dest = dir.join(format!("{nanos}-{name}"));
+        std::fs::copy(&src, &dest).context("Cannot copy the document")?;
+        let res = self.0.execute(
+            "INSERT INTO documents(application_id,label,path,managed) VALUES(?,?,?,1)",
+            params![id, label.trim(), dest.to_string_lossy()],
+        );
+        if res.is_err() {
+            let _ = std::fs::remove_file(&dest);
+        }
+        res?;
+        Ok(())
+    }
+    pub fn documents(&self, id: i64) -> Result<Vec<Document>> {
+        let mut q = self.0.prepare(
+            "SELECT id,label,path,managed FROM documents WHERE application_id=? ORDER BY id",
+        )?;
         Ok(q.query_map([id], |r| {
             Ok(Document {
                 id: r.get(0)?,
                 label: r.get(1)?,
                 path: r.get(2)?,
+                managed: r.get(3)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?)
     }
-    /// Removes only the link; the file itself is never touched.
+    /// Removes the link. Your own file is never touched; a managed copy (made by
+    /// `attach --copy`) belongs to Jobi and is deleted with its link.
     pub fn delete_document(&self, id: i64) -> Result<()> {
+        let managed_path: Option<(bool, String)> = self
+            .0
+            .query_row("SELECT managed,path FROM documents WHERE id=?", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .ok();
         if self.0.execute("DELETE FROM documents WHERE id=?", [id])? == 0 {
             bail!("Document link #{id} not found");
+        }
+        if let Some((true, path)) = managed_path {
+            let _ = std::fs::remove_file(path);
         }
         Ok(())
     }
@@ -542,6 +592,35 @@ mod tests {
         // Re-opening an up-to-date database changes nothing.
         let s = Store::initialize(Connection::open_in_memory()?)?;
         migrate(&s.0, MIGRATIONS.len())?;
+        Ok(())
+    }
+    #[test]
+    fn managed_document_copies_survive_the_original_and_are_removed_on_unlink() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("jobi-managed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        let s = Store::open(&dir.join("t.sqlite3"))?;
+        let id = {
+            let mut s2 = Store::open(&dir.join("t.sqlite3"))?;
+            s2.save(None, "A", "R", "Applied", "", "")?
+        };
+        let original = dir.join("cv.pdf");
+        std::fs::write(&original, "v1")?;
+        s.add_document_copy(id, "CV", &original.to_string_lossy())?;
+        std::fs::remove_file(&original)?;
+        let d = s.documents(id)?.remove(0);
+        assert!(d.managed && !d.missing());
+        assert_eq!(std::fs::read_to_string(&d.path)?, "v1");
+        assert!(d.path.contains("documents"));
+        s.delete_document(d.id)?;
+        assert!(!Path::new(&d.path).exists());
+        // In-memory databases have nowhere to keep copies.
+        let mem = Store::initialize(Connection::open_in_memory()?)?;
+        assert!(
+            mem.add_document_copy(1, "x", &original.to_string_lossy())
+                .is_err()
+        );
+        std::fs::remove_dir_all(&dir)?;
         Ok(())
     }
     #[test]

@@ -294,23 +294,26 @@ fn main() -> Result<()> {
             (Some(c), Some(r)) => {
                 let due = dates::resolve_due(&due, today())?;
                 let stage = stage.unwrap_or_else(|| config.default_stage.clone());
-                println!(
-                    "Added application #{}",
-                    store.save(None, &c, &r, &stage, &action, &due)?
-                );
+                let (action, due) = config.with_follow_up(&stage, &action, &due, today());
+                let id = store.save(None, &c, &r, &stage, &action, &due)?;
+                println!("Added application #{id}");
+                if !action.is_empty() && !due.is_empty() {
+                    println!("Next action: {action} (due {due})");
+                }
             }
             _ => ui::run(&mut store, true, &config)?,
         },
         Some(Command::Status { quiet }) => {
             let rows = store.list(false)?;
-            let (line, urgent) = due_summary(&rows);
+            let stale = store.stale_ids(config.stale_days)?.len();
+            let (line, urgent) = due_summary(&rows, stale);
             if cli.json {
                 let (overdue, due_today) =
                     store::due_counts(&rows, &today().format("%Y-%m-%d").to_string());
                 let open = rows.iter().filter(|a| !a.action.is_empty()).count();
                 println!(
                     "{}",
-                    serde_json::json!({"overdue": overdue, "due_today": due_today, "open": open})
+                    serde_json::json!({"overdue": overdue, "due_today": due_today, "open": open, "stale": stale})
                 );
             } else if urgent > 0 || !quiet {
                 println!("{line}");
@@ -453,7 +456,7 @@ fn main() -> Result<()> {
         }
         Some(Command::Completions { .. } | Command::Man) => unreachable!(),
         Some(Command::Notify) => {
-            let (line, urgent) = due_summary(&store.list(false)?);
+            let (line, urgent) = due_summary(&store.list(false)?, 0);
             if urgent > 0 {
                 notify("Jobi", &line);
             }
@@ -649,7 +652,7 @@ fn report_missing(missing: &[String]) {
     }
 }
 /// ("2 overdue · 1 due today · 5 open", overdue + due today)
-fn due_summary(rows: &[store::Application]) -> (String, usize) {
+fn due_summary(rows: &[store::Application], stale: usize) -> (String, usize) {
     let (overdue, due_today) = store::due_counts(rows, &today().format("%Y-%m-%d").to_string());
     let open = rows.iter().filter(|a| !a.action.is_empty()).count();
     let mut parts = vec![];
@@ -663,6 +666,9 @@ fn due_summary(rows: &[store::Application]) -> (String, usize) {
         parts.push("nothing due today".into());
     }
     parts.push(format!("{open} open"));
+    if stale > 0 {
+        parts.push(format!("{stale} stale"));
+    }
     (parts.join(" · "), overdue + due_today)
 }
 /// Desktop notification via the platform tool; falls back to printing.

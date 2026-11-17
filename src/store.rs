@@ -338,6 +338,17 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+    /// Open applications (Applied through Offer) with no activity for `days` days.
+    pub fn stale_ids(&self, days: u32) -> Result<std::collections::HashSet<i64>> {
+        let mut q = self.0.prepare(
+            "SELECT a.id FROM applications a
+             WHERE a.archived=0 AND a.stage IN ('Applied','Screening','Interview','Offer')
+               AND COALESCE((SELECT MAX(at) FROM activity WHERE application_id=a.id),'0')
+                   < strftime('%Y-%m-%d %H:%M:%S','now',?)",
+        )?;
+        Ok(q.query_map([format!("-{days} days")], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
     /// Moves an application to another stage and records it; returns the previous stage.
     pub fn set_stage(&mut self, id: i64, stage: &str) -> Result<String> {
         if !STAGES.contains(&stage) {
@@ -565,6 +576,15 @@ mod tests {
         assert_eq!(s.set_stage(a, "Interview")?, "Applied");
         assert!(s.history(a)?[0].contains("Applied → Interview"));
         assert!(s.set_stage(a, "Nope").is_err() && s.set_stage(99, "Offer").is_err());
+        // Stale = no activity within the window; fresh activity clears it.
+        assert_eq!(s.stale_ids(14)?.len(), 0);
+        s.0.execute(
+            "UPDATE activity SET at='2020-01-01 00:00:00' WHERE application_id IN (?,?)",
+            [a, b],
+        )?;
+        assert_eq!(s.stale_ids(14)?.len(), 2);
+        s.note(a, "touched")?;
+        assert_eq!(s.stale_ids(14)?.into_iter().collect::<Vec<_>>(), [b]);
         s.complete(b)?;
         s.reopen_action(b, "Call", "2026-11-17")?;
         assert_eq!(s.list(false)?[1].action, "Call");

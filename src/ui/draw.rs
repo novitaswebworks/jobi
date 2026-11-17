@@ -31,23 +31,32 @@ pub(super) fn draw(f: &mut Frame, app: &App, store: &Store) {
             },
         ));
     }
-    if app.overdue + app.due_today > 0 {
-        spans.push(Span::raw("   "));
-        if app.overdue > 0 {
-            spans.push(Span::styled(
-                format!("{} overdue", app.overdue),
-                pal.danger(),
-            ));
-        }
-        if app.overdue > 0 && app.due_today > 0 {
-            spans.push(Span::styled(" · ", pal.dim()));
-        }
-        if app.due_today > 0 {
-            spans.push(Span::styled(
-                format!("{} due today", app.due_today),
-                pal.warn(),
-            ));
-        }
+    let mut badges: Vec<Span> = vec![];
+    if app.overdue > 0 {
+        badges.push(Span::styled(
+            format!("{} overdue", app.overdue),
+            pal.danger(),
+        ));
+    }
+    if app.due_today > 0 {
+        badges.push(Span::styled(
+            format!("{} due today", app.due_today),
+            pal.warn(),
+        ));
+    }
+    if !app.stale.is_empty() {
+        badges.push(Span::styled(
+            format!("{} stale", app.stale.len()),
+            pal.dim(),
+        ));
+    }
+    for (i, b) in badges.into_iter().enumerate() {
+        spans.push(if i == 0 {
+            Span::raw("   ")
+        } else {
+            Span::styled(" · ", pal.dim())
+        });
+        spans.push(b);
     }
     f.render_widget(
         Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::BOTTOM)),
@@ -64,6 +73,7 @@ pub(super) fn draw(f: &mut Frame, app: &App, store: &Store) {
         .format("%Y-%m-%d")
         .to_string();
     let mut items: Vec<ListItem> = vec![];
+    let mut meta: Vec<(Option<usize>, u16)> = vec![];
     let mut shown_selected = 0;
     let mut group = "";
     for (i, a) in app.rows.iter().enumerate() {
@@ -86,6 +96,7 @@ pub(super) fn draw(f: &mut Frame, app: &App, store: &Store) {
                     format!("── {g} ──"),
                     pal.dim(),
                 ))));
+                meta.push((None, 1));
             }
         }
         if i == app.selected {
@@ -100,14 +111,19 @@ pub(super) fn draw(f: &mut Frame, app: &App, store: &Store) {
         } else {
             (a.due.clone(), pal.dim())
         };
+        let mut second = vec![
+            Span::styled(a.stage.clone(), pal.stage(&a.stage)),
+            Span::styled("  |  ", pal.dim()),
+            Span::styled(due, due_style),
+        ];
+        if app.stale.contains(&a.id) {
+            second.push(Span::styled("  · stale", pal.warn()));
+        }
         items.push(ListItem::new(vec![
             Line::from(format!("{} · {}", a.company, a.role)),
-            Line::from(vec![
-                Span::styled(a.stage.clone(), pal.stage(&a.stage)),
-                Span::styled("  |  ", pal.dim()),
-                Span::styled(due, due_style),
-            ]),
+            Line::from(second),
         ]));
+        meta.push((Some(i), 2));
     }
     let title = format!(
         " {} records · / {}{} ",
@@ -131,7 +147,12 @@ pub(super) fn draw(f: &mut Frame, app: &App, store: &Store) {
             panes[0],
             &mut state,
         );
+        let mut hit = app.hit.borrow_mut();
+        hit.list = Block::bordered().inner(panes[0]);
+        hit.offset = state.offset();
+        hit.items = meta;
     }
+    app.hit.borrow_mut().details = panes[1];
     let detail: Vec<Line> = if let Some(a) = app.rows.get(app.selected) {
         let mut lines = vec![
             Line::from(Span::styled(a.company.clone(), Style::new().bold())),
@@ -158,14 +179,60 @@ pub(super) fn draw(f: &mut Frame, app: &App, store: &Store) {
                     Span::raw(a.due.clone())
                 },
             ]),
-            Line::from(""),
-            Line::from(Span::styled(
-                "[p] Posting · [i] Interview · [d] Link document · [v] View details · [s] Stage",
-                pal.dim(),
-            )),
-            Line::from(""),
-            Line::from(Span::styled("ACTIVITY · newest first", pal.dim())),
         ];
+        if app.stale.contains(&a.id) {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "No activity for {}+ days: time to follow up?",
+                    app.config.stale_days
+                ),
+                pal.warn(),
+            )));
+        }
+        if let Some(o) = &app.offer {
+            lines.push(Line::from(vec![
+                Span::styled("Offer: ", pal.stage("Offer")),
+                Span::raw(o.summary()),
+            ]));
+        }
+        if !app.tasks.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled("TASKS", pal.dim())));
+            for t in &app.tasks {
+                let due = if t.due.is_empty() {
+                    String::new()
+                } else {
+                    format!("  ({})", t.due)
+                };
+                lines.push(Line::from(if t.done {
+                    Span::styled(format!("☑ {}{due}", t.title), pal.dim())
+                } else {
+                    Span::raw(format!("☐ {}{due}", t.title))
+                }));
+            }
+        }
+        if !app.contacts.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled("CONTACTS", pal.dim())));
+            for c in &app.contacts {
+                let parts: Vec<&str> = [&c.role, &c.email, &c.phone]
+                    .into_iter()
+                    .filter(|s| !s.is_empty())
+                    .map(String::as_str)
+                    .collect();
+                lines.push(Line::from(format!("{} · {}", c.name, parts.join(" · "))));
+            }
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "[p] Posting · [i] Interview · [d] Document · [o] Offer · [c] Contact · [T] Task · [v] Review · [s] Stage",
+            pal.dim(),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "ACTIVITY · newest first",
+            pal.dim(),
+        )));
         for h in &app.history {
             lines.push(Line::from(h.clone()));
             lines.push(Line::from(""));
@@ -256,49 +323,37 @@ pub(super) fn draw(f: &mut Frame, app: &App, store: &Store) {
             f.render_widget(
                 Paragraph::new(format!("{text}▏\n\nEnter Save · Esc Cancel"))
                     .wrap(Wrap { trim: false })
-                    .block(Block::bordered().title(" Add a note ")),
+                    .block(Block::bordered().title(" Add a note · Ctrl+E opens your editor ")),
                 r,
             );
         }
-        Mode::Help => {
-            let r = popup(f, 70, 18);
+        Mode::Help(scroll) => {
+            let r = popup(f, 70, 22);
             f.render_widget(
-                Paragraph::new(
-                    "1/2/3, Tab  Switch views\nj/k, ↑/↓    Select application\n/           Search (Esc clears)\na / e       Add / edit application\nn / x       Add a note / complete next action\ns / S       Next / previous stage\nu           Undo last x, z or s\nz           Archive / restore\nt           Pipeline statistics\np / i / d   Posting / interview / link document\nv           Details: j/k select, e edit interview,\n            r remove interview / unlink document\nCtrl+E      In a form: edit long text in $EDITOR\nPgUp/PgDn   Scroll details and history\nq, Ctrl+C   Exit\nAny key closes. History times are UTC.",
-                )
-                .block(Block::bordered().title(" Keyboard help ")),
+                Paragraph::new(HELP).scroll((*scroll, 0)).block(
+                    Block::bordered()
+                        .title(" Keyboard help ")
+                        .title_bottom(" ↑/↓ scroll · Esc closes "),
+                ),
                 r,
             );
         }
         Mode::Prepare(kind, fields, field, error, _) => {
-            let (title, labels) = match *kind {
-                0 => (
-                    "Job posting",
-                    vec!["URL", "Description (Ctrl+E opens your editor)"],
-                ),
-                1 | 3 => (
-                    if *kind == 3 {
-                        "Edit interview"
-                    } else {
-                        "Schedule interview"
-                    },
-                    vec![
-                        "Starts at RFC3339 e.g. 2026-11-20T14:00:00+05:30",
-                        "Timezone",
-                        "Interview type",
-                        "Meeting URL",
-                        "Notes (Ctrl+E opens your editor)",
-                    ],
-                ),
-                _ => ("Link document", vec!["Label", "Existing file path"]),
-            };
-            let r = popup(f, 76, 18);
+            let (title, labels) = spec(*kind);
+            let r = popup(f, 76, (labels.len() as u16 * 2 + 4).clamp(8, 22));
             let mut lines = vec![Line::from("Tab changes fields · Enter saves · Esc cancels")];
             for (i, label) in labels.iter().enumerate() {
-                lines.push(Line::from(format!(
-                    "{label}: {}{}",
-                    fields[i].replace('\n', " ⏎ "),
-                    if *field == i { " ▏" } else { "" }
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "{label}: {}{}",
+                        fields[i].replace('\n', " ⏎ "),
+                        if *field == i { " ▏" } else { "" }
+                    ),
+                    if *field == i {
+                        pal.accent().bold()
+                    } else {
+                        Style::default()
+                    },
                 )));
                 lines.push(Line::from(""));
             }
@@ -306,56 +361,126 @@ pub(super) fn draw(f: &mut Frame, app: &App, store: &Store) {
             f.render_widget(
                 Paragraph::new(lines)
                     .wrap(Wrap { trim: false })
-                    .block(Block::bordered().title(title)),
+                    .block(Block::bordered().title(format!(" {title} "))),
                 r,
             );
         }
         Mode::Inspect(index, sel) => {
-            let r = popup(f, 76, 24);
+            let r = popup(f, 80, 26);
             if let Some(a) = app.rows.get(*index) {
+                let items = inspect_items(store, a.id).unwrap_or_default();
                 let posting = store.posting(a.id).unwrap_or_default();
-                let ivs = store.interviews(a.id).unwrap_or_default();
-                let docs = store.documents(a.id).unwrap_or_default();
-                let mark = |n: usize| if n == *sel { "▌ " } else { "  " };
-                let mut c = format!("{} · {}\n\nJOB POSTING\n{}\n", a.company, a.role, posting.0);
+                let mut lines = vec![
+                    Line::from(Span::styled(
+                        format!("{} · {}", a.company, a.role),
+                        Style::new().bold(),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled("JOB POSTING", pal.dim())),
+                    Line::from(posting.0.clone()),
+                ];
                 let desc: Vec<&str> = posting.1.lines().collect();
-                c += &desc.iter().take(4).copied().collect::<Vec<_>>().join("\n");
+                lines.extend(desc.iter().take(4).map(|l| Line::from(l.to_string())));
                 if desc.len() > 4 {
-                    c += "\n…";
+                    lines.push(Line::from("…"));
                 }
-                c += "\n\nINTERVIEWS\n";
-                if ivs.is_empty() {
-                    c += "  none\n";
+                let mut sel_line = 0;
+                let mut n = 0;
+                for (heading, kind) in [
+                    ("INTERVIEWS", 0),
+                    ("DOCUMENTS", 1),
+                    ("TASKS", 2),
+                    ("CONTACTS", 3),
+                ] {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(heading, pal.dim())));
+                    let mut any = false;
+                    while let Some(item) = items.get(n) {
+                        let this = match item {
+                            Item::Interview(_) => 0,
+                            Item::Document(_) => 1,
+                            Item::Task(_) => 2,
+                            Item::Contact(_) => 3,
+                        };
+                        if this != kind {
+                            break;
+                        }
+                        any = true;
+                        if n == *sel {
+                            sel_line = lines.len();
+                        }
+                        let mark = if n == *sel { "▌ " } else { "  " };
+                        match item {
+                            Item::Interview(i) => {
+                                lines.push(Line::from(format!(
+                                    "{mark}{} {} {}",
+                                    i.starts_at, i.timezone, i.kind
+                                )));
+                                lines.push(Line::from(Span::styled(
+                                    format!("    {} {}", i.url, i.notes.replace('\n', " ⏎ ")),
+                                    pal.dim(),
+                                )));
+                            }
+                            Item::Document(d) => {
+                                let mut spans =
+                                    vec![Span::raw(format!("{mark}{}  {}", d.label, d.path))];
+                                if d.missing() {
+                                    spans.push(Span::styled("  FILE MISSING", pal.danger()));
+                                }
+                                lines.push(Line::from(spans));
+                            }
+                            Item::Task(t) => {
+                                let due = if t.due.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("  ({})", t.due)
+                                };
+                                lines.push(Line::from(if t.done {
+                                    Span::styled(format!("{mark}☑ {}{due}", t.title), pal.dim())
+                                } else {
+                                    Span::raw(format!("{mark}☐ {}{due}", t.title))
+                                }));
+                            }
+                            Item::Contact(c) => {
+                                lines.push(Line::from(format!(
+                                    "{mark}{} · {} · {} {}",
+                                    c.name, c.role, c.email, c.phone
+                                )));
+                                if !c.notes.is_empty() || !c.last_contacted.is_empty() {
+                                    lines.push(Line::from(Span::styled(
+                                        format!(
+                                            "    last contacted {} · {}",
+                                            c.last_contacted,
+                                            c.notes.replace('\n', " ⏎ ")
+                                        ),
+                                        pal.dim(),
+                                    )));
+                                }
+                            }
+                        }
+                        n += 1;
+                    }
+                    if !any {
+                        lines.push(Line::from("  none"));
+                    }
                 }
-                for (n, i) in ivs.iter().enumerate() {
-                    c += &format!(
-                        "{}{} {} {}\n    {} {}\n",
-                        mark(n),
-                        i.starts_at,
-                        i.timezone,
-                        i.kind,
-                        i.url,
-                        i.notes.replace('\n', " ⏎ ")
-                    );
-                }
-                c += "\nDOCUMENTS\n";
-                if docs.is_empty() {
-                    c += "  none\n";
-                }
-                for (n, d) in docs.iter().enumerate() {
-                    c += &format!(
-                        "{}{}  {}{}\n",
-                        mark(ivs.len() + n),
-                        d.label,
-                        d.path,
-                        if d.missing() { "  (FILE MISSING)" } else { "" }
-                    );
-                }
-                c += "\nj/k select · e edit interview · r remove/unlink · Esc close";
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled("OFFER", pal.dim())));
+                lines.push(Line::from(match &app.offer {
+                    Some(o) => format!("  {}", o.summary()),
+                    None => "  none · press o in the main view to record one".to_string(),
+                }));
+                let inner_h = r.height.saturating_sub(2) as usize;
+                let scroll = sel_line.saturating_sub(inner_h.saturating_sub(3)) as u16;
                 f.render_widget(
-                    Paragraph::new(c)
+                    Paragraph::new(lines)
                         .wrap(Wrap { trim: false })
-                        .block(Block::bordered().title("Application details")),
+                        .scroll((scroll, 0))
+                        .block(
+                            Block::bordered()
+                                .title(" Application details ")
+                                .title_bottom(" j/k select · Space done · e edit interview · r remove · Esc close "),
+                        ),
                     r,
                 );
             }
@@ -368,21 +493,17 @@ pub(super) fn draw(f: &mut Frame, app: &App, store: &Store) {
                 r,
             );
         }
-        Mode::Remove(is_interview, _, label) => {
+        Mode::Remove(kind, _, label) => {
             let r = popup(f, 60, 7);
+            let (verb, note) = match kind {
+                RemoveKind::Interview => ("Remove interview", "This cannot be undone."),
+                RemoveKind::Document => ("Unlink document", "The file itself is not deleted."),
+                RemoveKind::Task => ("Delete task", "This cannot be undone."),
+                RemoveKind::Contact => ("Delete contact", "This cannot be undone."),
+            };
             f.render_widget(
                 Paragraph::new(format!(
-                    "{} {label}?\n{}\n\ny Confirm · n / Esc Cancel",
-                    if *is_interview {
-                        "Remove interview"
-                    } else {
-                        "Unlink document"
-                    },
-                    if *is_interview {
-                        "This cannot be undone."
-                    } else {
-                        "The file itself is not deleted."
-                    },
+                    "{verb} {label}?\n{note}\n\ny Confirm · n / Esc Cancel"
                 ))
                 .wrap(Wrap { trim: false })
                 .block(Block::bordered().title(" Confirm ")),
@@ -427,3 +548,29 @@ fn pipeline(pal: &super::theme::Palette, stage: &str) -> Line<'static> {
     }
     Line::from(spans)
 }
+
+const HELP: &str = "VIEWS
+1/2/3, Tab  Switch views
+j/k, ↑/↓    Select (mouse: click, wheel)
+/           Search: words, stage:offer,
+            due:overdue|today|week|none
+
+APPLICATIONS
+a / e       Add / edit application
+n / x       Add a note / complete next action
+s / S       Next / previous stage
+u           Undo last x, z or s
+z           Archive / restore
+t           Pipeline statistics
+
+DETAILS
+p / i / d   Posting / interview / link document
+o / c / T   Offer / contact / task
+v           Review everything: j/k select,
+            Space done, e edit interview,
+            r remove or unlink
+Ctrl+E      In a form or note: edit in $EDITOR
+PgUp/PgDn   Scroll details and history
+q, Ctrl+C   Exit
+
+History times are UTC.";

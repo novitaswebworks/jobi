@@ -17,8 +17,10 @@ pub struct Config {
     pub theme: String,
     /// Active applications with no activity for this many days are flagged as stale.
     pub stale_days: u32,
-    /// Days until the suggested follow-up when an application is added as Applied without an action.
+    /// Days until the automatic follow-up on a new Applied application that has no action.
     pub follow_up_days: u32,
+    /// Add a "Follow up" action to new Applied applications that have none.
+    pub auto_follow_up: bool,
 }
 
 impl Default for Config {
@@ -29,6 +31,7 @@ impl Default for Config {
             theme: "dark".into(),
             stale_days: 14,
             follow_up_days: 7,
+            auto_follow_up: true,
         }
     }
 }
@@ -92,6 +95,26 @@ impl Config {
         }
     }
 
+    /// Returns (action, due) for a new application, adding the automatic follow-up when
+    /// it was added as Applied with neither an action nor a due date.
+    pub fn with_follow_up(
+        &self,
+        stage: &str,
+        action: &str,
+        due: &str,
+        today: chrono::NaiveDate,
+    ) -> (String, String) {
+        if self.auto_follow_up
+            && stage == "Applied"
+            && action.trim().is_empty()
+            && due.trim().is_empty()
+        {
+            let when = today + chrono::Duration::days(self.follow_up_days.into());
+            return ("Follow up".into(), when.format("%Y-%m-%d").to_string());
+        }
+        (action.to_string(), due.to_string())
+    }
+
     pub fn timezone(&self) -> String {
         self.default_timezone
             .clone()
@@ -119,5 +142,24 @@ mod tests {
             assert!(Config::parse(bad).is_err(), "{bad}");
         }
         assert!(!Config::default().timezone().is_empty());
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 17).unwrap();
+        let d = Config::default();
+        assert_eq!(
+            d.with_follow_up("Applied", "", "", today),
+            ("Follow up".into(), "2026-11-24".into())
+        );
+        assert_eq!(
+            d.with_follow_up("Applied", "Call", "", today),
+            ("Call".into(), String::new())
+        );
+        assert_eq!(
+            d.with_follow_up("Wishlist", "", "", today),
+            (String::new(), String::new())
+        );
+        let off = Config::parse("auto_follow_up = false").unwrap();
+        assert_eq!(
+            off.with_follow_up("Applied", "", "", today),
+            (String::new(), String::new())
+        );
     }
 }

@@ -1,4 +1,5 @@
 //! CSV import/export and complete JSON backup/restore.
+use crate::extras::Offer;
 use crate::store::{Store, validate_app, validate_interview};
 use anyhow::{Context, Result, bail};
 use rusqlite::params;
@@ -17,7 +18,8 @@ const CSV_COLUMNS: [&str; 9] = [
     "id",
 ];
 const BACKUP_FORMAT: &str = "jobi-backup";
-const BACKUP_VERSION: u32 = 1;
+/// Version 2 added tasks, contacts and offers; version 1 files are still readable.
+const BACKUP_VERSION: u32 = 2;
 
 /// Writes `data` to a new file; refuses to replace an existing one without `force`.
 fn write_new(path: &Path, data: &[u8], force: bool) -> Result<()> {
@@ -269,6 +271,25 @@ struct DocumentRec {
     managed: bool,
 }
 #[derive(Serialize, Deserialize)]
+struct TaskRec {
+    id: i64,
+    application_id: i64,
+    title: String,
+    due: String,
+    done: bool,
+}
+#[derive(Serialize, Deserialize)]
+struct ContactRec {
+    id: i64,
+    application_id: i64,
+    name: String,
+    role: String,
+    email: String,
+    phone: String,
+    notes: String,
+    last_contacted: String,
+}
+#[derive(Serialize, Deserialize)]
 struct Backup {
     format: String,
     version: u32,
@@ -278,6 +299,12 @@ struct Backup {
     postings: Vec<PostingRec>,
     interviews: Vec<InterviewRec>,
     documents: Vec<DocumentRec>,
+    #[serde(default)]
+    tasks: Vec<TaskRec>,
+    #[serde(default)]
+    contacts: Vec<ContactRec>,
+    #[serde(default)]
+    offers: Vec<Offer>,
 }
 
 fn collect<T>(
@@ -370,6 +397,50 @@ fn read_all(store: &Store) -> Result<Backup> {
                 })
             },
         )?,
+        tasks: collect(
+            store,
+            "SELECT id,application_id,title,due,done FROM tasks ORDER BY id",
+            |r| {
+                Ok(TaskRec {
+                    id: r.get(0)?,
+                    application_id: r.get(1)?,
+                    title: r.get(2)?,
+                    due: r.get(3)?,
+                    done: r.get(4)?,
+                })
+            },
+        )?,
+        contacts: collect(
+            store,
+            "SELECT id,application_id,name,role,email,phone,notes,last_contacted FROM contacts ORDER BY id",
+            |r| {
+                Ok(ContactRec {
+                    id: r.get(0)?,
+                    application_id: r.get(1)?,
+                    name: r.get(2)?,
+                    role: r.get(3)?,
+                    email: r.get(4)?,
+                    phone: r.get(5)?,
+                    notes: r.get(6)?,
+                    last_contacted: r.get(7)?,
+                })
+            },
+        )?,
+        offers: collect(
+            store,
+            "SELECT application_id,base,currency,bonus,equity,deadline,notes FROM offers ORDER BY application_id",
+            |r| {
+                Ok(Offer {
+                    application_id: r.get(0)?,
+                    base: r.get(1)?,
+                    currency: r.get(2)?,
+                    bonus: r.get(3)?,
+                    equity: r.get(4)?,
+                    deadline: r.get(5)?,
+                    notes: r.get(6)?,
+                })
+            },
+        )?,
     })
 }
 
@@ -384,27 +455,37 @@ pub fn backup(store: &Store, path: &Path, force: bool) -> Result<(usize, Vec<Str
     Ok((data.applications.len(), missing_documents(&data.documents)))
 }
 
-/// Restores a backup into an EMPTY database, all-or-nothing, preserving ids.
-/// Returns (applications, missing linked documents).
-pub fn restore(store: &mut Store, path: &Path) -> Result<(usize, Vec<String>)> {
+/// What a restore did.
+pub struct RestoreReport {
+    pub restored: usize,
+    /// Applications left out because the same company and role already exist (merge only).
+    pub skipped: Vec<String>,
+    pub missing_documents: Vec<String>,
+}
+
+/// Restores a backup, all-or-nothing. Without `merge` the database must be empty and ids
+/// are preserved. With `merge` the backup is added to existing data: applications already
+/// tracked (same company and role) are skipped, the rest get new ids, and their history,
+/// posting, interviews, documents, tasks, contacts and offer come along.
+pub fn restore(store: &mut Store, path: &Path, merge: bool) -> Result<RestoreReport> {
     let raw =
         fs::read_to_string(path).with_context(|| format!("Cannot read {}", path.display()))?;
     let b: Backup = serde_json::from_str(&raw).context("Not a valid Jobi backup file")?;
     if b.format != BACKUP_FORMAT {
         bail!("Not a Jobi backup (format '{}')", b.format);
     }
-    if b.version != BACKUP_VERSION {
+    if !(1..=BACKUP_VERSION).contains(&b.version) {
         bail!(
-            "Unsupported backup version {} (expected {BACKUP_VERSION})",
+            "Unsupported backup version {} (this Jobi reads 1 to {BACKUP_VERSION})",
             b.version
         );
     }
     let existing: i64 = store
         .0
         .query_row("SELECT COUNT(*) FROM applications", [], |r| r.get(0))?;
-    if existing > 0 {
+    if existing > 0 && !merge {
         bail!(
-            "Refusing to restore into a database that already has {existing} application(s). Use an empty database, e.g. `jobi --db new.sqlite3 restore FILE`"
+            "Refusing to restore into a database that already has {existing} application(s). Use an empty database, e.g. `jobi --db new.sqlite3 restore FILE`, or add --merge"
         );
     }
     for a in &b.applications {
@@ -415,39 +496,96 @@ pub fn restore(store: &mut Store, path: &Path) -> Result<(usize, Vec<String>)> {
         validate_interview(&i.starts_at, &i.timezone)
             .with_context(|| format!("interview #{}", i.id))?;
     }
+    let mut known: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for a in store.list(false)?.into_iter().chain(store.list(true)?) {
+        known.insert(dup_key(&a.company, &a.role));
+    }
+    // old application id -> id in this database; None when the application was skipped
+    let mut map: std::collections::HashMap<i64, Option<i64>> = std::collections::HashMap::new();
+    let mut skipped = vec![];
     let tx = store.0.transaction()?;
     for a in &b.applications {
+        if merge && !known.insert(dup_key(&a.company, &a.role)) {
+            skipped.push(format!("{} · {}", a.company, a.role));
+            map.insert(a.id, None);
+            continue;
+        }
+        let keep_id = (!merge).then_some(a.id);
         tx.execute(
             "INSERT INTO applications(id,company,role,stage,action,due,archived) VALUES(?,?,?,?,?,?,?)",
-            params![a.id, a.company, a.role, a.stage, a.action, a.due, a.archived],
+            params![keep_id, a.company, a.role, a.stage, a.action, a.due, a.archived],
         )?;
+        map.insert(a.id, Some(tx.last_insert_rowid()));
     }
+    // Resolves a child's parent: Ok(None) means "parent skipped, drop the row".
+    let parent = |old: i64, what: &str| -> Result<Option<i64>> {
+        map.get(&old)
+            .copied()
+            .with_context(|| format!("{what} refers to missing application #{old}"))
+    };
+    let child_id = |id: i64| (!merge).then_some(id);
     for a in &b.activity {
-        tx.execute(
-            "INSERT INTO activity(id,application_id,at,message) VALUES(?,?,?,?)",
-            params![a.id, a.application_id, a.at, a.message],
-        )?;
+        if let Some(app) = parent(a.application_id, "history entry")? {
+            tx.execute(
+                "INSERT INTO activity(id,application_id,at,message) VALUES(?,?,?,?)",
+                params![child_id(a.id), app, a.at, a.message],
+            )?;
+        }
     }
     for p in &b.postings {
-        tx.execute(
-            "INSERT INTO postings(application_id,url,description) VALUES(?,?,?)",
-            params![p.application_id, p.url, p.description],
-        )?;
+        if let Some(app) = parent(p.application_id, "posting")? {
+            tx.execute(
+                "INSERT INTO postings(application_id,url,description) VALUES(?,?,?)",
+                params![app, p.url, p.description],
+            )?;
+        }
     }
     for i in &b.interviews {
-        tx.execute(
-            "INSERT INTO interviews(id,application_id,starts_at,timezone,kind,meeting_url,notes) VALUES(?,?,?,?,?,?,?)",
-            params![i.id, i.application_id, i.starts_at, i.timezone, i.kind, i.meeting_url, i.notes],
-        )?;
+        if let Some(app) = parent(i.application_id, "interview")? {
+            tx.execute(
+                "INSERT INTO interviews(id,application_id,starts_at,timezone,kind,meeting_url,notes) VALUES(?,?,?,?,?,?,?)",
+                params![child_id(i.id), app, i.starts_at, i.timezone, i.kind, i.meeting_url, i.notes],
+            )?;
+        }
     }
     for d in &b.documents {
-        tx.execute(
-            "INSERT INTO documents(id,application_id,label,path,managed) VALUES(?,?,?,?,?)",
-            params![d.id, d.application_id, d.label, d.path, d.managed],
-        )?;
+        if let Some(app) = parent(d.application_id, "document")? {
+            tx.execute(
+                "INSERT INTO documents(id,application_id,label,path,managed) VALUES(?,?,?,?,?)",
+                params![child_id(d.id), app, d.label, d.path, d.managed],
+            )?;
+        }
+    }
+    for t in &b.tasks {
+        if let Some(app) = parent(t.application_id, "task")? {
+            tx.execute(
+                "INSERT INTO tasks(id,application_id,title,due,done) VALUES(?,?,?,?,?)",
+                params![child_id(t.id), app, t.title, t.due, t.done],
+            )?;
+        }
+    }
+    for c in &b.contacts {
+        if let Some(app) = parent(c.application_id, "contact")? {
+            tx.execute(
+                "INSERT INTO contacts(id,application_id,name,role,email,phone,notes,last_contacted) VALUES(?,?,?,?,?,?,?,?)",
+                params![child_id(c.id), app, c.name, c.role, c.email, c.phone, c.notes, c.last_contacted],
+            )?;
+        }
+    }
+    for o in &b.offers {
+        if let Some(app) = parent(o.application_id, "offer")? {
+            tx.execute(
+                "INSERT INTO offers(application_id,base,currency,bonus,equity,deadline,notes) VALUES(?,?,?,?,?,?,?)",
+                params![app, o.base, o.currency, o.bonus, o.equity, o.deadline, o.notes],
+            )?;
+        }
     }
     tx.commit()?;
-    Ok((b.applications.len(), missing_documents(&b.documents)))
+    Ok(RestoreReport {
+        restored: b.applications.len() - skipped.len(),
+        skipped,
+        missing_documents: missing_documents(&b.documents),
+    })
 }
 
 #[cfg(test)]
@@ -578,15 +716,15 @@ mod tests {
         assert_eq!((n, missing.len()), (1, 0));
         fs::remove_file(&doc)?;
         let mut b = mem();
-        let (n, missing) = restore(&mut b, &p)?;
-        assert_eq!(n, 1);
-        assert_eq!(missing.len(), 1); // linked file was deleted
+        let r = restore(&mut b, &p, false)?;
+        assert_eq!(r.restored, 1);
+        assert_eq!(r.missing_documents.len(), 1); // linked file was deleted
         assert_eq!(b.history(id)?, a.history(id)?);
         assert_eq!(b.posting(id)?, a.posting(id)?);
         assert_eq!(b.interviews(id)?, a.interviews(id)?);
         assert_eq!(b.documents(id)?.len(), 1);
         assert!(b.list(true)?[0].archived);
-        assert!(restore(&mut b, &p).is_err()); // non-empty target refused
+        assert!(restore(&mut b, &p, false).is_err()); // non-empty target refused
         fs::remove_file(p)?;
         Ok(())
     }
@@ -599,8 +737,96 @@ mod tests {
             r#"{"format":"jobi-backup","version":1,"exported_at":"x","applications":[{"id":1,"company":"A","role":"B","stage":"Applied","action":"","due":"","archived":false}],"activity":[{"id":1,"application_id":99,"at":"t","message":"m"}],"postings":[],"interviews":[],"documents":[]}"#,
         )?;
         let mut s = mem();
-        assert!(restore(&mut s, &p).is_err());
+        assert!(restore(&mut s, &p, false).is_err());
         assert!(s.list(false)?.is_empty());
+        fs::remove_file(p)?;
+        Ok(())
+    }
+
+    fn rich_store() -> Result<(Store, i64)> {
+        let mut a = mem();
+        let id = a.save(None, "Acme", "Eng", "Offer", "Reply", "2026-11-20")?;
+        a.note(id, "hello")?;
+        a.add_task(id, "Send thank-you", "2026-11-21")?;
+        a.add_contact(
+            id,
+            &crate::extras::Contact {
+                id: 0,
+                name: "Jane".into(),
+                role: "Recruiter".into(),
+                email: "j@x.com".into(),
+                phone: String::new(),
+                notes: String::new(),
+                last_contacted: String::new(),
+            },
+        )?;
+        a.save_offer(&Offer {
+            application_id: id,
+            base: 100000,
+            currency: "USD".into(),
+            bonus: 0,
+            equity: String::new(),
+            deadline: String::new(),
+            notes: String::new(),
+        })?;
+        Ok((a, id))
+    }
+
+    #[test]
+    fn backup_v2_roundtrips_tasks_contacts_offers_and_reads_v1() -> Result<()> {
+        let (a, id) = rich_store()?;
+        let p = tmp("v2.json");
+        backup(&a, &p, false)?;
+        assert!(fs::read_to_string(&p)?.contains("\"version\": 2"));
+        let mut b = mem();
+        restore(&mut b, &p, false)?;
+        assert_eq!(b.tasks(id)?, a.tasks(id)?);
+        assert_eq!(b.contacts(id)?, a.contacts(id)?);
+        assert_eq!(b.offer(id)?, a.offer(id)?);
+        // A version 1 file (no task/contact/offer keys) still restores.
+        let v1 = fs::read_to_string(&p)?.replace("\"version\": 2", "\"version\": 1");
+        fs::write(&p, v1)?;
+        let mut c = mem();
+        assert_eq!(restore(&mut c, &p, false)?.restored, 1);
+        fs::remove_file(p)?;
+        Ok(())
+    }
+
+    #[test]
+    fn merge_restore_adds_new_skips_existing_and_remaps_ids() -> Result<()> {
+        // Back up a store holding both Acme and Newco, merge into one holding Acme and Zed.
+        let mut both = mem();
+        both.save(None, "Acme", "Eng", "Offer", "Reply", "2026-11-20")?;
+        both.save(None, "Newco", "Dev", "Applied", "", "")?;
+        both.note(2, "from backup")?;
+        both.add_task(2, "Do thing", "")?;
+        both.add_task(1, "acme task", "")?;
+        let p = tmp("merge.json");
+        backup(&both, &p, false)?;
+        let mut target = mem();
+        target.save(None, "Zed", "Ops", "Applied", "", "")?; // id 1 collides with backup ids
+        target.save(None, "ACME", "eng", "Applied", "", "")?; // same company and role as backup #1
+        let r = restore(&mut target, &p, true)?;
+        assert_eq!((r.restored, r.skipped.len()), (1, 1));
+        let companies: Vec<_> = target.list(false)?.into_iter().map(|x| x.company).collect();
+        assert_eq!(companies, ["ACME", "Newco", "Zed"]);
+        let newco = target
+            .list(false)?
+            .into_iter()
+            .find(|x| x.company == "Newco")
+            .unwrap();
+        assert!(newco.id > 2);
+        assert_eq!(target.tasks(newco.id)?[0].title, "Do thing");
+        assert!(
+            target
+                .history(newco.id)?
+                .iter()
+                .any(|h| h.contains("from backup"))
+        );
+        // The skipped duplicate brought nothing along.
+        assert!(target.tasks(2)?.is_empty());
+        // Without --merge a non-empty target is still refused.
+        assert!(restore(&mut target, &p, false).is_err());
         fs::remove_file(p)?;
         Ok(())
     }

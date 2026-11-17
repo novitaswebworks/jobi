@@ -45,6 +45,18 @@ const MIGRATIONS: &[&str] = &[
      CREATE TABLE IF NOT EXISTS postings (
        application_id INTEGER PRIMARY KEY REFERENCES applications(id) ON DELETE CASCADE,
        url TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '');",
+    // 3: tasks, contacts and offers
+    "CREATE TABLE IF NOT EXISTS tasks (
+       id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+       title TEXT NOT NULL, due TEXT NOT NULL DEFAULT '', done INTEGER NOT NULL DEFAULT 0);
+     CREATE TABLE IF NOT EXISTS contacts (
+       id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+       name TEXT NOT NULL, role TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '',
+       phone TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '', last_contacted TEXT NOT NULL DEFAULT '');
+     CREATE TABLE IF NOT EXISTS offers (
+       application_id INTEGER PRIMARY KEY REFERENCES applications(id) ON DELETE CASCADE,
+       base INTEGER NOT NULL, currency TEXT NOT NULL, bonus INTEGER NOT NULL DEFAULT 0,
+       equity TEXT NOT NULL DEFAULT '', deadline TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '');",
 ];
 /// Upgrades `db` to `target`, one transactional step per version. Refuses databases
 /// written by a newer Jobi instead of silently downgrading them.
@@ -113,7 +125,7 @@ impl Store {
         migrate(&db, MIGRATIONS.len())?;
         Ok(Self(db))
     }
-    fn require_app(&self, id: i64) -> Result<()> {
+    pub(crate) fn require_app(&self, id: i64) -> Result<()> {
         let n: i64 =
             self.0
                 .query_row("SELECT COUNT(*) FROM applications WHERE id=?", [id], |r| {

@@ -1,5 +1,6 @@
 mod config;
 mod dates;
+mod extras;
 mod portable;
 mod stats;
 mod store;
@@ -22,7 +23,92 @@ struct Cli {
     command: Option<Command>,
 }
 #[derive(Subcommand)]
+enum TaskCmd {
+    /// Add a task to an application's checklist
+    Add {
+        id: i64,
+        title: String,
+        /// YYYY-MM-DD, today, tomorrow, +3d, +2w or a weekday
+        #[arg(long, default_value = "")]
+        due: String,
+    },
+    /// List an application's tasks, with task ids
+    List { id: i64 },
+    /// Mark a task done
+    Done { task_id: i64 },
+    /// Mark a task not done
+    Reopen { task_id: i64 },
+    /// Delete a task
+    Rm { task_id: i64 },
+}
+#[derive(Subcommand)]
+enum ContactCmd {
+    /// Add a recruiter, referrer or interviewer to an application
+    Add {
+        id: i64,
+        name: String,
+        #[arg(long, default_value = "")]
+        role: String,
+        #[arg(long, default_value = "")]
+        email: String,
+        #[arg(long, default_value = "")]
+        phone: String,
+        #[arg(long, default_value = "")]
+        notes: String,
+        /// Date you last spoke (today, YYYY-MM-DD, ...)
+        #[arg(long, default_value = "")]
+        last_contacted: String,
+    },
+    /// List an application's contacts, with contact ids
+    List { id: i64 },
+    /// Delete a contact
+    Rm { contact_id: i64 },
+}
+#[derive(Subcommand)]
+enum OfferCmd {
+    /// Record or replace an application's offer
+    Set {
+        id: i64,
+        /// Yearly base pay in whole currency units, e.g. 120000
+        #[arg(long)]
+        base: i64,
+        /// 3-letter currency code, e.g. USD, EUR, INR
+        #[arg(long)]
+        currency: String,
+        #[arg(long, default_value_t = 0)]
+        bonus: i64,
+        #[arg(long, default_value = "")]
+        equity: String,
+        /// Date the offer expires
+        #[arg(long, default_value = "")]
+        deadline: String,
+        #[arg(long, default_value = "")]
+        notes: String,
+    },
+    /// Show an application's offer
+    Show { id: i64 },
+    /// Delete an application's offer
+    Rm { id: i64 },
+}
+#[derive(Subcommand)]
 enum Command {
+    /// Manage an application's task checklist
+    Task {
+        #[command(subcommand)]
+        cmd: TaskCmd,
+    },
+    /// Manage an application's contacts
+    Contact {
+        #[command(subcommand)]
+        cmd: ContactCmd,
+    },
+    /// Record and show an application's offer
+    Offer {
+        #[command(subcommand)]
+        cmd: OfferCmd,
+    },
+    /// Compare all recorded offers side by side
+    Offers,
     /// Show applications with open actions, earliest due first
     Today,
     /// One-line summary of overdue and due-today actions (for shell prompts)
@@ -148,8 +234,13 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Restore a JSON backup into an empty database
-    Restore { path: PathBuf },
+    /// Restore a JSON backup into an empty database (or add it to existing data with --merge)
+    Restore {
+        path: PathBuf,
+        /// Add to the current database, skipping applications whose company and role already exist
+        #[arg(long)]
+        merge: bool,
+    },
     /// Print the database location
     Path,
 }
@@ -223,6 +314,127 @@ fn main() -> Result<()> {
                 );
             } else if urgent > 0 || !quiet {
                 println!("{line}");
+            }
+        }
+        Some(Command::Task { cmd }) => match cmd {
+            TaskCmd::Add { id, title, due } => {
+                store.add_task(id, &title, &dates::resolve_due(&due, today())?)?;
+                println!("Task added to #{id}");
+            }
+            TaskCmd::List { id } => {
+                let tasks = store.tasks(id)?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&tasks)?);
+                }
+                for t in tasks.iter().filter(|_| !cli.json) {
+                    let mark = if t.done { "[x]" } else { "[ ]" };
+                    println!("{}\t{mark}\t{}\t{}", t.id, t.due, t.title);
+                }
+            }
+            TaskCmd::Done { task_id } => {
+                store.set_task_done(task_id, true)?;
+                println!("Task #{task_id} done");
+            }
+            TaskCmd::Reopen { task_id } => {
+                store.set_task_done(task_id, false)?;
+                println!("Task #{task_id} reopened");
+            }
+            TaskCmd::Rm { task_id } => {
+                store.delete_task(task_id)?;
+                println!("Task #{task_id} deleted");
+            }
+        },
+        Some(Command::Contact { cmd }) => match cmd {
+            ContactCmd::Add {
+                id,
+                name,
+                role,
+                email,
+                phone,
+                notes,
+                last_contacted,
+            } => {
+                let c = extras::Contact {
+                    id: 0,
+                    name,
+                    role,
+                    email,
+                    phone,
+                    notes,
+                    last_contacted: dates::resolve_due(&last_contacted, today())?,
+                };
+                store.add_contact(id, &c)?;
+                println!("Contact added to #{id}");
+            }
+            ContactCmd::List { id } => {
+                let cs = store.contacts(id)?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&cs)?);
+                }
+                for c in cs.iter().filter(|_| !cli.json) {
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}\t{}",
+                        c.id, c.name, c.role, c.email, c.phone, c.last_contacted
+                    );
+                }
+            }
+            ContactCmd::Rm { contact_id } => {
+                store.delete_contact(contact_id)?;
+                println!("Contact #{contact_id} deleted");
+            }
+        },
+        Some(Command::Offer { cmd }) => match cmd {
+            OfferCmd::Set {
+                id,
+                base,
+                currency,
+                bonus,
+                equity,
+                deadline,
+                notes,
+            } => {
+                store.save_offer(&extras::Offer {
+                    application_id: id,
+                    base,
+                    currency,
+                    bonus,
+                    equity,
+                    deadline: dates::resolve_due(&deadline, today())?,
+                    notes,
+                })?;
+                println!("Offer saved for #{id}");
+            }
+            OfferCmd::Show { id } => match store.offer(id)? {
+                Some(o) if cli.json => println!("{}", serde_json::to_string_pretty(&o)?),
+                Some(o) => {
+                    println!("{}", o.summary());
+                    if !o.notes.is_empty() {
+                        println!("{}", o.notes);
+                    }
+                }
+                None => bail!("Application #{id} has no offer"),
+            },
+            OfferCmd::Rm { id } => {
+                store.delete_offer(id)?;
+                println!("Offer removed from #{id}");
+            }
+        },
+        Some(Command::Offers) => {
+            let all = store.offers()?;
+            if cli.json {
+                let v: Vec<_> = all
+                    .iter()
+                    .map(|(a, o)| serde_json::json!({"application": a, "offer": o}))
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            } else if all.is_empty() {
+                println!("No offers recorded. Use `jobi offer set ID --base N --currency USD`.");
+            } else {
+                println!("ID\tCOMPANY\tROLE\tOFFER");
+                for (a, o) in &all {
+                    println!("{}\t{}\t{}\t{}", a.id, a.company, a.role, o.summary());
+                }
+                println!("(sorted by currency, then base pay; no currency conversion)");
             }
         }
         Some(Command::Stats) => {
@@ -413,10 +625,13 @@ fn main() -> Result<()> {
             println!("Backed up {n} application(s) to {}", path.display());
             report_missing(&missing);
         }
-        Some(Command::Restore { path }) => {
-            let (n, missing) = portable::restore(&mut store, &path)?;
-            println!("Restored {n} application(s)");
-            report_missing(&missing);
+        Some(Command::Restore { path, merge }) => {
+            let r = portable::restore(&mut store, &path, merge)?;
+            println!("Restored {} application(s)", r.restored);
+            for name in &r.skipped {
+                println!("skipped (already tracked): {name}");
+            }
+            report_missing(&r.missing_documents);
         }
         Some(Command::Path) => unreachable!(),
     }

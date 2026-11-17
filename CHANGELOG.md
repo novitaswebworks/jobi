@@ -4,7 +4,7 @@ All notable changes to Jobi are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.3.0] - 2026-11-17
 
 ### Changed
 - Redesigned interface: rounded frames, keycap-style hint bars, stage tags, urgency markers,
@@ -18,7 +18,8 @@ All notable changes to Jobi are recorded here. The format follows
 ### Added
 - `install.sh`: checksum-verified installer for Linux x86_64, macOS arm64 and macOS x86_64.
 - Homebrew formula and tap instructions in `packaging/homebrew`.
-- Release archives for macOS x86_64, and a LICENSE file inside every archive.
+- Release archives for macOS x86_64, and a LICENSE file inside every archive. The Linux archive
+  is now built on Ubuntu 22.04 so it runs on older distributions.
 - The Homebrew formula installs prebuilt release binaries (about 4 MB, no dependencies) on
   Apple silicon and Linux x86_64, and builds from source elsewhere.
 

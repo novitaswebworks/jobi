@@ -5,7 +5,7 @@ class Jobi < Formula
   homepage "https://github.com/novitaswebworks/jobi"
   url "https://github.com/novitaswebworks/jobi.git",
       tag:      "v0.2.0",
-      revision: "a8004da28dcbb79b55ad0cd141c6c807d1b78ca7"
+      revision: "07946a87cd6063fdd67f98462f7e45f6052a80d6"
   license "MIT"
   head "https://github.com/novitaswebworks/jobi.git", branch: "main"
 

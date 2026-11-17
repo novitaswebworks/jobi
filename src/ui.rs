@@ -1,3 +1,5 @@
+use crate::config::Config;
+use crate::dates::resolve_due;
 use crate::store::{Application, Interview, STAGES, Store};
 use anyhow::{Context, Result, bail};
 use chrono::Local;
@@ -31,7 +33,7 @@ struct Form {
     error: String,
 }
 impl Form {
-    fn new(a: Option<&Application>) -> Self {
+    fn new(a: Option<&Application>, default_stage: &str) -> Self {
         Self {
             id: a.map(|a| a.id),
             values: a
@@ -47,7 +49,7 @@ impl Form {
                 .unwrap_or(vec![
                     String::new(),
                     String::new(),
-                    "Applied".into(),
+                    default_stage.into(),
                     String::new(),
                     String::new(),
                 ]),
@@ -112,6 +114,7 @@ struct App {
     scroll: u16,
     mode: Mode,
     status: String,
+    config: Config,
     /// set by the key handler; the run loop then suspends the TUI to launch the editor
     editor: bool,
     /// largest useful details scroll, measured by the last draw
@@ -137,7 +140,7 @@ impl App {
         Ok(())
     }
 }
-pub fn run(store: &mut Store, add: bool) -> Result<()> {
+pub fn run(store: &mut Store, add: bool, config: &Config) -> Result<()> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         bail!(
             "The interactive app requires a terminal. Use `jobi list`, `jobi today`, or `jobi add --company NAME --role ROLE`."
@@ -151,19 +154,29 @@ pub fn run(store: &mut Store, add: bool) -> Result<()> {
         history: vec![],
         scroll: 0,
         mode: if add {
-            Mode::Form(Form::new(None))
+            Mode::Form(Form::new(None, &config.default_stage))
         } else {
             Mode::Browse
         },
         status: "Local storage · no account required".into(),
+        config: config.clone(),
         editor: false,
         max_scroll: Cell::new(0),
     };
     app.refresh(store)?;
+    // SIGTERM/SIGHUP must leave the loop normally so the terminal is restored.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[cfg(unix)]
+    for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGHUP] {
+        signal_hook::flag::register(sig, stop.clone())?;
+    }
     let mut terminal = ratatui::init();
     let result = (|| -> Result<()> {
         loop {
             terminal.draw(|f| draw(f, &app, store))?;
+            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
             if !event::poll(Duration::from_millis(250))? {
                 continue;
             }
@@ -217,8 +230,10 @@ fn handle(app: &mut App, store: &mut Store, key: KeyEvent) -> Result<bool> {
             }
             KeyCode::Enter => {
                 let v = &form.values;
-                match store.save(form.id, &v[0], &v[1], &v[2], &v[3], &v[4]) {
+                let due = resolve_due(&v[4], chrono::Local::now().date_naive());
+                match due.and_then(|due| store.save(form.id, &v[0], &v[1], &v[2], &v[3], &due)) {
                     Ok(_) => {
+                        app.scroll = 0;
                         app.mode = Mode::Browse;
                         app.tab = 1;
                         app.query.clear();
@@ -243,6 +258,7 @@ fn handle(app: &mut App, store: &mut Store, key: KeyEvent) -> Result<bool> {
                 if let Some(a) = app.rows.get(app.selected) {
                     store.note(a.id, text)?;
                     app.status = "Note saved".into();
+                    app.scroll = 0;
                 }
                 app.mode = Mode::Browse;
             }
@@ -405,10 +421,10 @@ fn handle(app: &mut App, store: &mut Store, key: KeyEvent) -> Result<bool> {
             KeyCode::PageUp => app.scroll = app.scroll.min(app.max_scroll.get()).saturating_sub(5),
             KeyCode::Char('/') => app.mode = Mode::Search,
             KeyCode::Esc => app.query.clear(),
-            KeyCode::Char('a') => app.mode = Mode::Form(Form::new(None)),
+            KeyCode::Char('a') => app.mode = Mode::Form(Form::new(None, &app.config.default_stage)),
             KeyCode::Char('e') => {
                 if let Some(a) = app.rows.get(app.selected) {
-                    app.mode = Mode::Form(Form::new(Some(a)));
+                    app.mode = Mode::Form(Form::new(Some(a), &app.config.default_stage));
                 }
             }
             KeyCode::Char('n') if !app.rows.is_empty() => {
@@ -418,6 +434,7 @@ fn handle(app: &mut App, store: &mut Store, key: KeyEvent) -> Result<bool> {
                 if let Some(a) = app.rows.get(app.selected) {
                     store.complete(a.id)?;
                     app.status = "Action completed · press e to set the next one".into();
+                    app.scroll = 0;
                 }
             }
             KeyCode::Char('z') => {
@@ -434,7 +451,7 @@ fn handle(app: &mut App, store: &mut Store, key: KeyEvent) -> Result<bool> {
                     1,
                     vec![
                         String::new(),
-                        "Asia/Kolkata".into(),
+                        app.config.timezone(),
                         String::new(),
                         String::new(),
                         String::new(),
@@ -596,7 +613,7 @@ fn draw(f: &mut Frame, app: &App, store: &Store) {
                 "Role *",
                 "Stage ←/→",
                 "Next action",
-                "Due YYYY-MM-DD",
+                "Due (2026-12-01, tomorrow, +3d, fri)",
             ];
             let mut lines = vec![
                 Line::from(Span::styled(
@@ -824,6 +841,7 @@ mod tests {
                 scroll: 0,
                 mode: Mode::Browse,
                 status: String::new(),
+                config: Config::default(),
                 editor: false,
                 max_scroll: Cell::new(0),
             };
@@ -837,7 +855,7 @@ mod tests {
                 .collect();
             assert!(content.contains(if width < 50 { "Resize" } else { "JOBI" }));
             if width >= 50 {
-                app.mode = Mode::Form(Form::new(None));
+                app.mode = Mode::Form(Form::new(None, "Applied"));
                 terminal.draw(|f| draw(f, &app, &store))?;
                 let content: String = terminal
                     .backend()
@@ -889,6 +907,7 @@ mod tests {
             scroll: 9999,
             mode: Mode::Browse,
             status: String::new(),
+            config: Config::default(),
             editor: false,
             max_scroll: Cell::new(0),
         };

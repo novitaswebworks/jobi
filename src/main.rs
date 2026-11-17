@@ -1,7 +1,9 @@
+mod config;
+mod dates;
 mod portable;
 mod store;
 mod ui;
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use store::Store;
@@ -30,10 +32,12 @@ enum Command {
         company: Option<String>,
         #[arg(long, requires = "company")]
         role: Option<String>,
-        #[arg(long, default_value = "Applied")]
-        stage: String,
+        /// Defaults to `default_stage` from config.toml (Applied)
+        #[arg(long)]
+        stage: Option<String>,
         #[arg(long, default_value = "")]
         action: String,
+        /// YYYY-MM-DD, today, tomorrow, +3d, +2w or a weekday like fri
         #[arg(long, default_value = "")]
         due: String,
     },
@@ -62,8 +66,9 @@ enum Command {
         id: i64,
         #[arg(long)]
         at: String,
-        #[arg(long, default_value = "Asia/Kolkata")]
-        timezone: String,
+        /// IANA timezone; defaults to config.toml or the system timezone
+        #[arg(long)]
+        timezone: Option<String>,
         #[arg(long, default_value = "")]
         kind: String,
         #[arg(long, default_value = "")]
@@ -129,16 +134,10 @@ fn default_path() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("JOBI_DB") {
         return Ok(path.into());
     }
-    let home = PathBuf::from(
-        std::env::var_os("HOME").context("Set JOBI_DB or pass --db to choose storage")?,
-    );
-    #[cfg(target_os = "macos")]
-    let root = home.join("Library/Application Support");
-    #[cfg(not(target_os = "macos"))]
-    let root = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or(home.join(".local/share"));
-    Ok(root.join("jobi/jobi.sqlite3"))
+    Ok(config::data_dir()?.join("jobi.sqlite3"))
+}
+fn today() -> chrono::NaiveDate {
+    chrono::Local::now().date_naive()
 }
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -150,9 +149,10 @@ fn main() -> Result<()> {
         println!("{}", path.display());
         return Ok(());
     }
+    let config = config::Config::load()?;
     let mut store = Store::open(&path)?;
     match cli.command {
-        None => ui::run(&mut store, false)?,
+        None => ui::run(&mut store, false, &config)?,
         Some(Command::Add {
             company,
             role,
@@ -160,11 +160,15 @@ fn main() -> Result<()> {
             action,
             due,
         }) => match (company, role) {
-            (Some(c), Some(r)) => println!(
-                "Added application #{}",
-                store.save(None, &c, &r, &stage, &action, &due)?
-            ),
-            _ => ui::run(&mut store, true)?,
+            (Some(c), Some(r)) => {
+                let due = dates::resolve_due(&due, today())?;
+                let stage = stage.unwrap_or_else(|| config.default_stage.clone());
+                println!(
+                    "Added application #{}",
+                    store.save(None, &c, &r, &stage, &action, &due)?
+                );
+            }
+            _ => ui::run(&mut store, true, &config)?,
         },
         Some(Command::Today) => {
             let mut rows = store.list(false)?;
@@ -205,6 +209,7 @@ fn main() -> Result<()> {
             url,
             notes,
         }) => {
+            let timezone = timezone.unwrap_or_else(|| config.timezone());
             store.add_interview(id, &at, &timezone, &kind, &url, &notes)?;
             println!("Interview scheduled for #{id}");
         }

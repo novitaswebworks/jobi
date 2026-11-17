@@ -4,6 +4,22 @@ All notable changes to Jobi are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- Redesigned interface: rounded frames, keycap-style hint bars, stage tags, urgency markers,
+  relative due dates ("2d overdue"), a date and status summary in the header, section rules and
+  a calmer activity log in the details pane, coloured toasts, and a pipeline marker row.
+- New welcome screen, a rebuilt keyboard help page (sections, search syntax, date shortcuts,
+  scrolls on small terminals), consistent form and confirmation popups, and coloured
+  statistics bars.
+- The UI code is split into `draw`, `popups`, `help`, `widgets` and `theme` modules.
+
+### Added
+- `install.sh`: checksum-verified installer for Linux x86_64, macOS arm64 and macOS x86_64.
+- Homebrew formula and tap instructions in `packaging/homebrew`.
+- Release archives for macOS x86_64, and a LICENSE file inside every archive.
+
 ## [0.2.0] - 2026-11-17
 
 ### Added

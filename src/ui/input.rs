@@ -228,9 +228,9 @@ pub(super) fn handle(app: &mut App, store: &mut Store, key: KeyEvent) -> Result<
             _ => {}
         },
         Mode::Help(scroll) => match key.code {
-            KeyCode::Down | KeyCode::Char('j') => *scroll = (*scroll + 1).min(6),
+            KeyCode::Down | KeyCode::Char('j') => *scroll = (*scroll + 1).min(app.help_max.get()),
             KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
-            KeyCode::PageDown => *scroll = (*scroll + 8).min(6),
+            KeyCode::PageDown => *scroll = (*scroll + 8).min(app.help_max.get()),
             KeyCode::PageUp => *scroll = scroll.saturating_sub(8),
             _ => app.mode = Mode::Browse,
         },
@@ -379,7 +379,7 @@ pub(super) fn handle(app: &mut App, store: &mut Store, key: KeyEvent) -> Result<
                 None => app.status = "Nothing to undo".into(),
             },
             KeyCode::Char('t') => {
-                app.mode = Mode::Stats(crate::stats::render(&crate::stats::compute(store)?));
+                app.mode = Mode::Stats(crate::stats::compute(store)?);
             }
             KeyCode::Char('L') => {
                 let n = crate::stats::load_sample(store, Local::now().date_naive())?;

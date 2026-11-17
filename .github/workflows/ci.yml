@@ -36,18 +36,21 @@ jobs:
     strategy:
       matrix:
         include:
-          - { os: ubuntu-latest, name: linux-x86_64 }
-          - { os: macos-latest, name: macos-arm64 }
+          - { os: ubuntu-latest, name: linux-x86_64, target: x86_64-unknown-linux-gnu }
+          - { os: macos-latest, name: macos-arm64, target: aarch64-apple-darwin }
+          - { os: macos-latest, name: macos-x86_64, target: x86_64-apple-darwin }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release --locked
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Package
         run: |
           pkg="jobi-${GITHUB_REF_NAME}-${{ matrix.name }}"
           mkdir "$pkg"
-          cp target/release/jobi README.md "$pkg"/
+          cp target/${{ matrix.target }}/release/jobi README.md LICENSE "$pkg"/
           tar czf "$pkg.tar.gz" "$pkg"
           shasum -a 256 "$pkg.tar.gz" > "$pkg.tar.gz.sha256"
       - name: Upload to release

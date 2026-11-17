@@ -11,13 +11,16 @@ use crossterm::event::{
 };
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
 mod draw;
+mod help;
 mod input;
+mod popups;
 #[cfg(test)]
 mod tests;
 mod theme;
+mod widgets;
 use draw::draw;
 use input::{handle, handle_mouse};
 use std::{
@@ -89,8 +92,7 @@ enum Mode {
     /// application row, selected interview/document
     Inspect(usize, usize),
     Remove(RemoveKind, i64, String),
-    /// rendered pipeline statistics
-    Stats(String),
+    Stats(crate::stats::Stats),
 }
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum RemoveKind {
@@ -261,6 +263,8 @@ struct App {
     editor: bool,
     /// largest useful details scroll, measured by the last draw
     max_scroll: Cell<u16>,
+    /// how far the help page can scroll, measured by the last draw
+    help_max: Cell<u16>,
     hit: RefCell<Hit>,
     /// extras for the selected application
     tasks: Vec<Task>,
@@ -288,6 +292,7 @@ impl App {
             undo: None,
             editor: false,
             max_scroll: Cell::new(0),
+            help_max: Cell::new(0),
             hit: RefCell::default(),
             tasks: vec![],
             contacts: vec![],

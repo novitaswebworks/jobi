@@ -1,13 +1,18 @@
-# Jobi
+<h1 align="center">◆ Jobi</h1>
 
-[![CI](https://github.com/novitaswebworks/jobi/actions/workflows/ci.yml/badge.svg)](https://github.com/novitaswebworks/jobi/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+<p align="center"><b>Your next career move, one action at a time.</b><br>
+A local-first job application tracker for your terminal. No account, no network, no cloud:<br>
+your job search lives in one file on your computer.</p>
 
-**Your next career move, one action at a time.** Jobi is a local-first job application tracker for your terminal, built with Rust, [Ratatui](https://ratatui.rs), and SQLite. No account, no network, no cloud: your job search lives in one file on your computer.
+<p align="center">
+<a href="https://github.com/novitaswebworks/jobi/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/novitaswebworks/jobi/actions/workflows/ci.yml/badge.svg"></a>
+<a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+<img alt="Rust" src="https://img.shields.io/badge/built%20with-Rust-orange.svg">
+</p>
 
-![Jobi demo](docs/demo.gif)
+<p align="center"><img src="docs/demo.gif" alt="Jobi demo" width="900"></p>
 
-<sub>Full recording: [docs/demo.mp4](docs/demo.mp4). Re-create it with `vhs docs/demo.tape`.</sub>
+<p align="center"><sub>Full recording: <a href="docs/demo.mp4">docs/demo.mp4</a> · re-create it with <code>vhs docs/demo.tape</code></sub></p>
 
 ## Why Jobi
 
@@ -23,24 +28,39 @@ A job search is a pile of small follow-ups. Jobi keeps one thing front and centr
 
 ## Install
 
-Jobi needs a [Rust toolchain](https://rustup.rs). SQLite is bundled, so there are no system libraries to install.
+| Platform | Command |
+|----------|---------|
+| **macOS** (Homebrew) | `brew install novitaswebworks/tap/jobi` |
+| **Linux** and **macOS** (prebuilt binary) | `curl -fsSL https://raw.githubusercontent.com/novitaswebworks/jobi/main/install.sh \| sh` |
+| **Any platform** with [Rust](https://rustup.rs) | `cargo install --git https://github.com/novitaswebworks/jobi --locked` |
 
-```sh
-git clone https://github.com/novitaswebworks/jobi.git
-cd jobi
-cargo install --path . --locked
-```
+Homebrew builds from source (it installs Rust for you) and also installs shell completions and the man page; Linuxbrew works the same way. The script downloads the latest release for Linux x86_64, macOS arm64 or macOS x86_64, **verifies its SHA-256 checksum**, and installs `jobi` into `~/.local/bin` (set `JOBI_BIN_DIR` to change that, `JOBI_VERSION=v0.2.0` to pin a version). SQLite is bundled, so there are no system libraries to install. Check with `jobi --version`.
 
-Cargo installs `jobi` into `~/.cargo/bin`; make sure that directory is on your `PATH`. To upgrade, pull and run the same command again. Your database is upgraded in place on startup by versioned, transactional migrations; a database created by a *newer* Jobi is refused rather than downgraded.
+You can also download the archives from the [releases page](https://github.com/novitaswebworks/jobi/releases), or build from a clone with `cargo install --path . --locked`. To upgrade, rerun the same command. Your database is upgraded in place on startup by versioned, transactional migrations; a database created by a *newer* Jobi is refused rather than downgraded. To uninstall, remove the binary (`brew uninstall jobi`, or delete `~/.local/bin/jobi`); your data stays in the folder listed under [Where your data lives](#where-your-data-lives).
 
-Pushing a `vX.Y.Z` tag runs the [CI workflow](.github/workflows/ci.yml), which tests on Linux, macOS, and Windows and attaches `jobi-<tag>-linux-x86_64.tar.gz` and `jobi-<tag>-macos-arm64.tar.gz` (with SHA-256 files) to a GitHub release. Unpack the archive and put `jobi` on your `PATH`.
-
-**Shell completions and man page**
+**Shell completions and man page** (Homebrew does this for you)
 
 ```sh
 jobi completions zsh > ~/.zfunc/_jobi          # also bash, fish, elvish, powershell
 jobi man > ~/.local/share/man/man1/jobi.1
 ```
+
+## A look around
+
+<table>
+<tr>
+<td width="50%"><img src="docs/img/home.png" alt="Today view with details"><br><sub><b>Today</b>: what is overdue, due today and coming up, with the full picture of the selected application.</sub></td>
+<td width="50%"><img src="docs/img/review.png" alt="Review popup"><br><sub><b>Review</b>: posting, interviews, documents, tasks, contacts and offer in one place.</sub></td>
+</tr>
+<tr>
+<td><img src="docs/img/help.png" alt="Keyboard help"><br><sub><b>Help</b>: every key, search syntax and date shortcuts. Press <code>?</code> anywhere.</sub></td>
+<td><img src="docs/img/stats.png" alt="Pipeline statistics"><br><sub><b>Statistics</b>: where your applications are and how many advance.</sub></td>
+</tr>
+<tr>
+<td><img src="docs/img/add.png" alt="Add application form"><br><sub><b>Forms</b>: friendly dates such as <code>fri</code> or <code>+3d</code>, and your own stage names.</sub></td>
+<td><img src="docs/img/welcome.png" alt="First run"><br><sub><b>First run</b>: one key adds your first application, another loads sample data.</sub></td>
+</tr>
+</table>
 
 ## Quick start
 
@@ -230,7 +250,9 @@ src/ical.rs       iCalendar export
 src/stats.rs      Pipeline statistics and sample data
 src/config.rs     config.toml and platform directories
 src/dates.rs      Friendly due-date parsing
-src/ui/           Ratatui interface: input, draw, theme, tests
+src/ui/           Ratatui interface: input, draw, popups, help, theme, widgets, tests
+install.sh        Release installer for Linux and macOS (checksum-verified)
+packaging/        Homebrew formula and tap instructions
 tests/            Pseudo-terminal smoke test
 docs/             Demo recording (demo.tape, demo-seed.sh, demo.gif, demo.mp4)
 ```
@@ -245,6 +267,8 @@ cargo build && python3 tests/pty_smoke.py target/debug/jobi   # real-terminal ch
 ```
 
 The smoke test drives the binary in a pseudo-terminal and checks that quitting, `Ctrl+C`, `SIGTERM`, and `SIGHUP` restore the screen, that a tiny terminal shows the resize message, and that the `$EDITOR` hand-off works. To re-record the demo you need [vhs](https://github.com/charmbracelet/vhs), `ttyd`, and `ffmpeg`, with `jobi` on your `PATH`: `vhs docs/demo.tape`. See the [changelog](CHANGELOG.md) and [roadmap](ROADMAP.md).
+
+**Releases.** Pushing a `vX.Y.Z` tag runs the [CI workflow](.github/workflows/ci.yml): it tests on Linux, macOS and Windows, then attaches `jobi-<tag>-linux-x86_64.tar.gz`, `jobi-<tag>-macos-arm64.tar.gz` and `jobi-<tag>-macos-x86_64.tar.gz` (each with a SHA-256 file) to a GitHub release. After a release, update the Homebrew formula as described in [packaging/homebrew](packaging/homebrew/README.md).
 
 ## Status and limitations
 

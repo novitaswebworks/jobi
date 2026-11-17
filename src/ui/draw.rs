@@ -1,13 +1,23 @@
-//! Rendering: layout, list, details pane and popups.
+//! Rendering of the main view: header, application list, details pane and footer.
+use super::popups::draw_popup;
+use super::widgets::{frame, hints, keycap, rule};
 use super::*;
+use chrono::NaiveDate;
 
 pub(super) fn draw(f: &mut Frame, app: &App, store: &Store) {
     let area = f.area();
+    let pal = app.pal;
     if area.width < 50 || area.height < 18 {
         f.render_widget(
-            Paragraph::new(
-                "Jobi needs at least 50 columns × 18 rows.\nResize the terminal. Ctrl+C exits.",
-            ),
+            Paragraph::new(vec![
+                Line::from(Span::styled("◆ JOBI", pal.accent().bold())),
+                Line::from("Needs at least 50 columns × 18 rows."),
+                Line::from(Span::styled(
+                    "Resize the terminal. Ctrl+C exits.",
+                    pal.dim(),
+                )),
+            ])
+            .alignment(Alignment::Center),
             area,
         );
         return;
@@ -18,11 +28,38 @@ pub(super) fn draw(f: &mut Frame, app: &App, store: &Store) {
         Constraint::Length(3),
     ])
     .split(area);
+    header(f, app, parts[0]);
+    let panes = if area.width >= 100 {
+        Layout::horizontal([Constraint::Percentage(46), Constraint::Percentage(54)]).split(parts[1])
+    } else {
+        Layout::vertical([Constraint::Percentage(45), Constraint::Percentage(55)]).split(parts[1])
+    };
+    list_pane(f, app, panes[0]);
+    details_pane(f, app, panes[1]);
+    footer(f, app, parts[2]);
+    draw_popup(f, app, store);
+}
+
+fn header(f: &mut Frame, app: &App, area: Rect) {
     let pal = app.pal;
-    let names = ["1 Today", "2 Applications", "3 Archived"];
-    let mut spans = vec![Span::styled(" JOBI  ", pal.accent().bold())];
-    for (i, n) in names.iter().enumerate() {
-        spans.push(Span::styled(
+    let block = Block::default()
+        .borders(Borders::BOTTOM)
+        .border_style(pal.border());
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(inner);
+    let date = Local::now().format("%a %d %b %Y").to_string();
+    let cols = Layout::horizontal([
+        Constraint::Min(1),
+        Constraint::Length(date.chars().count() as u16 + 1),
+    ])
+    .split(rows[0]);
+    let mut tabs = vec![Span::styled(" ◆ JOBI  ", pal.accent().bold())];
+    for (i, n) in ["1 Today", "2 Applications", "3 Archived"]
+        .iter()
+        .enumerate()
+    {
+        tabs.push(Span::styled(
             format!(" {n} "),
             if app.tab == i {
                 pal.tab_active()
@@ -30,48 +67,64 @@ pub(super) fn draw(f: &mut Frame, app: &App, store: &Store) {
                 pal.tab_idle()
             },
         ));
+        tabs.push(Span::raw(" "));
     }
-    let mut badges: Vec<Span> = vec![];
-    if app.overdue > 0 {
-        badges.push(Span::styled(
-            format!("{} overdue", app.overdue),
-            pal.danger(),
-        ));
-    }
-    if app.due_today > 0 {
-        badges.push(Span::styled(
-            format!("{} due today", app.due_today),
-            pal.warn(),
-        ));
-    }
-    if !app.stale.is_empty() {
-        badges.push(Span::styled(
-            format!("{} stale", app.stale.len()),
-            pal.dim(),
-        ));
-    }
-    for (i, b) in badges.into_iter().enumerate() {
-        spans.push(if i == 0 {
-            Span::raw("   ")
-        } else {
-            Span::styled(" · ", pal.dim())
-        });
-        spans.push(b);
-    }
+    f.render_widget(Paragraph::new(Line::from(tabs)), cols[0]);
     f.render_widget(
-        Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::BOTTOM)),
-        parts[0],
+        Paragraph::new(Span::styled(date, pal.dim())).alignment(Alignment::Right),
+        cols[1],
     );
-    let panes = if area.width >= 100 {
-        Layout::horizontal([Constraint::Percentage(48), Constraint::Percentage(52)]).split(parts[1])
-    } else {
-        Layout::vertical([Constraint::Percentage(45), Constraint::Percentage(55)]).split(parts[1])
+    let mut badges: Vec<Span> = vec![Span::raw(" ")];
+    let mut push = |n: usize, text: &str, style: Style| {
+        if n > 0 {
+            if badges.len() > 1 {
+                badges.push(Span::raw("   "));
+            }
+            badges.push(Span::styled(format!("● {n} {text}"), style));
+        }
     };
+    push(app.overdue, "overdue", pal.danger());
+    push(app.due_today, "due today", pal.warn());
+    push(app.stale.len(), "stale", pal.dim());
+    if badges.len() == 1 {
+        badges.push(Span::styled("✓ All clear: nothing due today", pal.ok()));
+    }
+    f.render_widget(Paragraph::new(Line::from(badges)), rows[1]);
+}
+
+/// "2d overdue", "today", "tomorrow", "in 5d" relative to `now`.
+fn relative(due: &str, now: NaiveDate) -> Option<(String, i64)> {
+    let d = NaiveDate::parse_from_str(due, "%Y-%m-%d").ok()?;
+    let days = (d - now).num_days();
+    let text = match days {
+        i64::MIN..=-1 => format!("{}d overdue", -days),
+        0 => "today".into(),
+        1 => "tomorrow".into(),
+        n => format!("in {n}d"),
+    };
+    Some((text, days))
+}
+
+fn list_pane(f: &mut Frame, app: &App, area: Rect) {
+    let pal = app.pal;
     let now = Local::now().date_naive();
     let today = now.format("%Y-%m-%d").to_string();
     let week = (now + chrono::Duration::days(7))
         .format("%Y-%m-%d")
         .to_string();
+    let group_of = |due: &str| {
+        if due.is_empty() {
+            "No date"
+        } else if due < today.as_str() {
+            "Overdue"
+        } else if due == today {
+            "Today"
+        } else if due <= week.as_str() {
+            "This week"
+        } else {
+            "Later"
+        }
+    };
     let mut items: Vec<ListItem> = vec![];
     let mut meta: Vec<(Option<usize>, u16)> = vec![];
     let mut shown_selected = 0;
@@ -79,506 +132,371 @@ pub(super) fn draw(f: &mut Frame, app: &App, store: &Store) {
     for (i, a) in app.rows.iter().enumerate() {
         // The Today view is ordered by due date, so groups appear as contiguous runs.
         if app.tab == 0 {
-            let g = if a.due.is_empty() {
-                "No date"
-            } else if a.due < today {
-                "Overdue"
-            } else if a.due == today {
-                "Today"
-            } else if a.due <= week {
-                "This week"
-            } else {
-                "Later"
-            };
+            let g = group_of(&a.due);
             if g != group {
                 group = g;
-                items.push(ListItem::new(Line::from(Span::styled(
-                    format!("── {g} ──"),
-                    pal.dim(),
-                ))));
+                let n = app.rows.iter().filter(|r| group_of(&r.due) == g).count();
+                let style = match g {
+                    "Overdue" => pal.danger(),
+                    "Today" => pal.warn(),
+                    _ => pal.dim(),
+                };
+                items.push(ListItem::new(Line::from(vec![
+                    Span::styled(format!(" {g}"), style),
+                    Span::styled(format!(" · {n} "), pal.dim()),
+                    Span::styled("─".repeat(20), pal.border()),
+                ])));
                 meta.push((None, 1));
             }
         }
         if i == app.selected {
             shown_selected = items.len();
         }
-        let (due, due_style) = if a.due.is_empty() {
-            ("No due date".to_string(), pal.dim())
-        } else if a.due < today {
-            (format!("OVERDUE {}", a.due), pal.danger())
-        } else if a.due == today {
-            ("TODAY".to_string(), pal.warn())
-        } else {
-            (a.due.clone(), pal.dim())
+        let rel = relative(&a.due, now);
+        let (marker, due_text, due_style) = match (&rel, a.due.is_empty()) {
+            (_, true) => (Span::raw(" "), "no due date".to_string(), pal.dim()),
+            (Some((t, d)), _) if *d < 0 && !a.action.is_empty() => {
+                (Span::styled("▍", pal.danger()), t.clone(), pal.danger())
+            }
+            (Some((t, 0)), _) if !a.action.is_empty() => {
+                (Span::styled("▍", pal.warn()), t.clone(), pal.warn())
+            }
+            (Some((t, _)), _) => (Span::raw(" "), t.clone(), pal.dim()),
+            (None, _) => (Span::raw(" "), a.due.clone(), pal.dim()),
         };
         let mut second = vec![
-            Span::styled(a.stage.clone(), pal.stage_in(&app.stages, &a.stage)),
-            Span::styled("  |  ", pal.dim()),
-            Span::styled(due, due_style),
+            Span::raw(" "),
+            pal.chip(&app.stages, &a.stage),
+            Span::raw("  "),
+            Span::styled(due_text, due_style),
         ];
+        if !a.due.is_empty() {
+            second.push(Span::styled(format!(" · {}", a.due), pal.dim()));
+        }
         if app.stale.contains(&a.id) {
-            second.push(Span::styled("  · stale", pal.warn()));
+            second.push(Span::styled("  ⏳ stale", pal.warn()));
         }
         items.push(ListItem::new(vec![
-            Line::from(format!("{} · {}", a.company, a.role)),
+            Line::from(vec![
+                marker,
+                Span::styled(a.company.clone(), Style::new().bold()),
+                Span::styled(format!(" · {}", a.role), pal.dim()),
+            ]),
             Line::from(second),
         ]));
         meta.push((Some(i), 2));
     }
-    let title = format!(
-        " {} records · / {}{} ",
-        app.rows.len(),
-        app.query,
-        if matches!(app.mode, Mode::Search) {
-            "▏"
-        } else {
-            ""
-        }
+    let names = ["Today", "Applications", "Archived"];
+    let searching = matches!(app.mode, Mode::Search);
+    let bottom = if searching || !app.query.is_empty() {
+        Line::from(vec![
+            keycap(&pal, "/"),
+            Span::styled(
+                format!(" {}{}", app.query, if searching { "▏" } else { "" }),
+                pal.accent(),
+            ),
+        ])
+    } else {
+        hints(&pal, &[("/", "search")])
+    };
+    let block = frame(
+        &pal,
+        &format!("{} · {}", names[app.tab], app.rows.len()),
+        Some(bottom),
     );
     if items.is_empty() {
-        f.render_widget(Paragraph::new(if app.query.is_empty(){"Nothing here yet.\n\n[a] Add an application\n[L] Load sample data (empty database only)\n[2] Browse all applications\n\nToday shows open actions, with overdue and upcoming dates first."}else{"No matching applications. Esc clears search."}).wrap(Wrap{trim:false}).block(Block::bordered().title(title)),panes[0]);
-    } else {
-        let mut state = ListState::default().with_selected(Some(shown_selected));
-        f.render_stateful_widget(
-            List::new(items)
-                .block(Block::bordered().title(title))
-                .highlight_style(pal.selected())
-                .highlight_symbol("▌ "),
-            panes[0],
-            &mut state,
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        // A fixed-width card centred in the pane keeps the key rows aligned with each other.
+        let w = inner.width.min(44);
+        let card = Rect::new(inner.x + (inner.width - w) / 2, inner.y, w, inner.height);
+        f.render_widget(
+            Paragraph::new(empty_state(app)).wrap(Wrap { trim: false }),
+            card,
         );
-        let mut hit = app.hit.borrow_mut();
-        hit.list = Block::bordered().inner(panes[0]);
-        hit.offset = state.offset();
-        hit.items = meta;
+        return;
     }
-    app.hit.borrow_mut().details = panes[1];
-    let detail: Vec<Line> = if let Some(a) = app.rows.get(app.selected) {
-        let mut lines = vec![
-            Line::from(Span::styled(a.company.clone(), Style::new().bold())),
-            Line::from(a.role.clone()),
-            Line::from(""),
-            pipeline(&pal, &app.stages, &a.stage),
-            Line::from(format!(
-                "Next action: {}",
-                if a.action.is_empty() {
-                    "None — press e to add one"
-                } else {
-                    &a.action
-                }
-            )),
-            Line::from(vec![
-                Span::raw("Due: "),
-                if a.due.is_empty() {
-                    Span::raw("Not set")
-                } else if a.due < today && !a.action.is_empty() {
-                    Span::styled(format!("{} (overdue)", a.due), pal.danger())
-                } else if a.due == today && !a.action.is_empty() {
-                    Span::styled(format!("{} (today)", a.due), pal.warn())
-                } else {
-                    Span::raw(a.due.clone())
-                },
-            ]),
-        ];
-        if app.stale.contains(&a.id) {
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "No activity for {}+ days: time to follow up?",
-                    app.config.stale_days
-                ),
-                pal.warn(),
-            )));
-        }
-        if let Some(o) = &app.offer {
-            lines.push(Line::from(vec![
-                Span::styled("Offer: ", pal.stage("Offer")),
-                Span::raw(o.summary()),
-            ]));
-        }
-        if !app.tasks.is_empty() {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled("TASKS", pal.dim())));
-            for t in &app.tasks {
-                let due = if t.due.is_empty() {
-                    String::new()
-                } else {
-                    format!("  ({})", t.due)
-                };
-                lines.push(Line::from(if t.done {
-                    Span::styled(format!("☑ {}{due}", t.title), pal.dim())
-                } else {
-                    Span::raw(format!("☐ {}{due}", t.title))
-                }));
-            }
-        }
-        if !app.contacts.is_empty() {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled("CONTACTS", pal.dim())));
-            for c in &app.contacts {
-                let parts: Vec<&str> = [&c.role, &c.email, &c.phone]
-                    .into_iter()
-                    .filter(|s| !s.is_empty())
-                    .map(String::as_str)
-                    .collect();
-                lines.push(Line::from(format!("{} · {}", c.name, parts.join(" · "))));
-            }
-        }
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "[p] Posting · [i] Interview · [d] Document · [o] Offer · [c] Contact · [T] Task · [v] Review · [s] Stage",
-            pal.dim(),
-        )));
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "ACTIVITY · newest first",
-            pal.dim(),
-        )));
-        for h in &app.history {
-            lines.push(Line::from(h.clone()));
-            lines.push(Line::from(""));
-        }
-        lines.pop();
-        lines
-    } else {
-        vec![
-            Line::from("Your next career move, one action at a time."),
-            Line::from(""),
-            Line::from("Everything stays on this computer."),
-            Line::from("Press ? for keyboard help."),
-        ]
-    };
-    let details = Paragraph::new(detail).wrap(Wrap { trim: false });
-    let inner = Block::bordered().inner(panes[1]);
-    let total = u16::try_from(details.line_count(inner.width)).unwrap_or(u16::MAX);
-    let max_scroll = total.saturating_sub(inner.height);
-    app.max_scroll.set(max_scroll);
-    f.render_widget(
-        details
-            .scroll((app.scroll.min(max_scroll), 0))
-            .block(Block::bordered().title(if max_scroll > 0 {
-                " Details & history · PgUp/PgDn scroll "
-            } else {
-                " Details & history "
-            })),
-        panes[1],
+    let mut state = ListState::default().with_selected(Some(shown_selected));
+    f.render_stateful_widget(
+        List::new(items)
+            .block(block)
+            .highlight_style(pal.selected())
+            .highlight_symbol(""),
+        area,
+        &mut state,
     );
-    f.render_widget(
-        Paragraph::new(format!(
-            "a Add · e Edit · n Note · x Done · s Stage · u Undo · z Archive · ? Help · q Quit\n{}",
-            app.status
-        ))
-        .wrap(Wrap { trim: true })
-        .style(pal.accent()),
-        parts[2],
-    );
-    match &app.mode {
-        Mode::Form(form) => {
-            let r = popup(f, 70, 17);
-            let labels = [
-                "Company *",
-                "Role *",
-                "Stage ←/→",
-                "Next action",
-                "Due (2026-12-01, tomorrow, +3d, fri)",
-            ];
-            let mut lines = vec![
-                Line::from(Span::styled(
-                    if form.id.is_some() {
-                        "Edit application"
-                    } else {
-                        "New application"
-                    },
-                    pal.accent().bold(),
-                )),
-                Line::from(""),
-            ];
-            for (i, label) in labels.iter().enumerate() {
-                lines.push(Line::from(Span::styled(
-                    format!(
-                        "{label}: {}{}",
-                        form.values[i],
-                        if form.field == i { " ▏" } else { "" }
-                    ),
-                    if form.field == i {
-                        pal.accent().bold()
-                    } else {
-                        Style::default()
-                    },
-                )));
-                lines.push(Line::from(""));
-            }
-            lines.push(Line::from(
-                "Tab/↑/↓ Field · ←/→ Stage · Enter Save · Esc Cancel",
-            ));
-            lines.push(Line::from(Span::styled(&form.error, pal.danger())));
-            f.render_widget(
-                Paragraph::new(lines)
-                    .block(Block::bordered().title(" Jobi "))
-                    .wrap(Wrap { trim: false }),
-                r,
-            );
-        }
-        Mode::Note(text) => {
-            let r = popup(f, 70, 8);
-            f.render_widget(
-                Paragraph::new(format!("{text}▏\n\nEnter Save · Esc Cancel"))
-                    .wrap(Wrap { trim: false })
-                    .block(Block::bordered().title(" Add a note · Ctrl+E opens your editor ")),
-                r,
-            );
-        }
-        Mode::Help(scroll) => {
-            let r = popup(f, 70, 22);
-            f.render_widget(
-                Paragraph::new(HELP).scroll((*scroll, 0)).block(
-                    Block::bordered()
-                        .title(" Keyboard help ")
-                        .title_bottom(" ↑/↓ scroll · Esc closes "),
-                ),
-                r,
-            );
-        }
-        Mode::Prepare(kind, fields, field, error, _) => {
-            let (title, labels) = spec(*kind);
-            let r = popup(f, 76, (labels.len() as u16 * 2 + 4).clamp(8, 22));
-            let mut lines = vec![Line::from("Tab changes fields · Enter saves · Esc cancels")];
-            for (i, label) in labels.iter().enumerate() {
-                lines.push(Line::from(Span::styled(
-                    format!(
-                        "{label}: {}{}",
-                        fields[i].replace('\n', " ⏎ "),
-                        if *field == i { " ▏" } else { "" }
-                    ),
-                    if *field == i {
-                        pal.accent().bold()
-                    } else {
-                        Style::default()
-                    },
-                )));
-                lines.push(Line::from(""));
-            }
-            lines.push(Line::from(Span::styled(error, pal.danger())));
-            f.render_widget(
-                Paragraph::new(lines)
-                    .wrap(Wrap { trim: false })
-                    .block(Block::bordered().title(format!(" {title} "))),
-                r,
-            );
-        }
-        Mode::Inspect(index, sel) => {
-            let r = popup(f, 80, 26);
-            if let Some(a) = app.rows.get(*index) {
-                let items = inspect_items(store, a.id).unwrap_or_default();
-                let posting = store.posting(a.id).unwrap_or_default();
-                let mut lines = vec![
-                    Line::from(Span::styled(
-                        format!("{} · {}", a.company, a.role),
-                        Style::new().bold(),
-                    )),
-                    Line::from(""),
-                    Line::from(Span::styled("JOB POSTING", pal.dim())),
-                    Line::from(posting.0.clone()),
-                ];
-                let desc: Vec<&str> = posting.1.lines().collect();
-                lines.extend(desc.iter().take(4).map(|l| Line::from(l.to_string())));
-                if desc.len() > 4 {
-                    lines.push(Line::from("…"));
-                }
-                let mut sel_line = 0;
-                let mut n = 0;
-                for (heading, kind) in [
-                    ("INTERVIEWS", 0),
-                    ("DOCUMENTS", 1),
-                    ("TASKS", 2),
-                    ("CONTACTS", 3),
-                ] {
-                    lines.push(Line::from(""));
-                    lines.push(Line::from(Span::styled(heading, pal.dim())));
-                    let mut any = false;
-                    while let Some(item) = items.get(n) {
-                        let this = match item {
-                            Item::Interview(_) => 0,
-                            Item::Document(_) => 1,
-                            Item::Task(_) => 2,
-                            Item::Contact(_) => 3,
-                        };
-                        if this != kind {
-                            break;
-                        }
-                        any = true;
-                        if n == *sel {
-                            sel_line = lines.len();
-                        }
-                        let mark = if n == *sel { "▌ " } else { "  " };
-                        match item {
-                            Item::Interview(i) => {
-                                lines.push(Line::from(format!(
-                                    "{mark}{} {} {}",
-                                    i.starts_at, i.timezone, i.kind
-                                )));
-                                lines.push(Line::from(Span::styled(
-                                    format!("    {} {}", i.url, i.notes.replace('\n', " ⏎ ")),
-                                    pal.dim(),
-                                )));
-                            }
-                            Item::Document(d) => {
-                                let mut spans =
-                                    vec![Span::raw(format!("{mark}{}  {}", d.label, d.path))];
-                                if d.missing() {
-                                    spans.push(Span::styled("  FILE MISSING", pal.danger()));
-                                }
-                                lines.push(Line::from(spans));
-                            }
-                            Item::Task(t) => {
-                                let due = if t.due.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!("  ({})", t.due)
-                                };
-                                lines.push(Line::from(if t.done {
-                                    Span::styled(format!("{mark}☑ {}{due}", t.title), pal.dim())
-                                } else {
-                                    Span::raw(format!("{mark}☐ {}{due}", t.title))
-                                }));
-                            }
-                            Item::Contact(c) => {
-                                lines.push(Line::from(format!(
-                                    "{mark}{} · {} · {} {}",
-                                    c.name, c.role, c.email, c.phone
-                                )));
-                                if !c.notes.is_empty() || !c.last_contacted.is_empty() {
-                                    lines.push(Line::from(Span::styled(
-                                        format!(
-                                            "    last contacted {} · {}",
-                                            c.last_contacted,
-                                            c.notes.replace('\n', " ⏎ ")
-                                        ),
-                                        pal.dim(),
-                                    )));
-                                }
-                            }
-                        }
-                        n += 1;
-                    }
-                    if !any {
-                        lines.push(Line::from("  none"));
-                    }
-                }
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled("OFFER", pal.dim())));
-                lines.push(Line::from(match &app.offer {
-                    Some(o) => format!("  {}", o.summary()),
-                    None => "  none · press o in the main view to record one".to_string(),
-                }));
-                let inner_h = r.height.saturating_sub(2) as usize;
-                let scroll = sel_line.saturating_sub(inner_h.saturating_sub(3)) as u16;
-                f.render_widget(
-                    Paragraph::new(lines)
-                        .wrap(Wrap { trim: false })
-                        .scroll((scroll, 0))
-                        .block(
-                            Block::bordered()
-                                .title(" Application details ")
-                                .title_bottom(" j/k select · Space done · e edit interview · r remove · Esc close "),
-                        ),
-                    r,
-                );
-            }
-        }
-        Mode::Stats(text) => {
-            let r = popup(f, 60, 24);
-            f.render_widget(
-                Paragraph::new(format!("{text}\nAny key closes"))
-                    .block(Block::bordered().title(" Pipeline statistics ")),
-                r,
-            );
-        }
-        Mode::Remove(kind, _, label) => {
-            let r = popup(f, 60, 7);
-            let (verb, note) = match kind {
-                RemoveKind::Interview => ("Remove interview", "This cannot be undone."),
-                RemoveKind::Document => (
-                    "Unlink document",
-                    "Your own file is never deleted; a copy made by Jobi is.",
-                ),
-                RemoveKind::Task => ("Delete task", "This cannot be undone."),
-                RemoveKind::Contact => ("Delete contact", "This cannot be undone."),
-            };
-            f.render_widget(
-                Paragraph::new(format!(
-                    "{verb} {label}?\n{note}\n\ny Confirm · n / Esc Cancel"
-                ))
-                .wrap(Wrap { trim: false })
-                .block(Block::bordered().title(" Confirm ")),
-                r,
-            );
-        }
-        Mode::Archive(_, state) => {
-            let r = popup(f, 60, 6);
-            f.render_widget(Paragraph::new(format!("{} this application?\nHistory will be preserved.\n\ny Confirm · n / Esc Cancel",if *state{"Archive"}else{"Restore"})).block(Block::bordered().title(" Confirm ")),r);
-        }
-        _ => {}
-    }
-}
-fn popup(f: &mut Frame, width: u16, height: u16) -> Rect {
-    let a = f.area();
-    let w = width.min(a.width);
-    let h = height.min(a.height);
-    let r = Rect::new((a.width - w) / 2, (a.height - h) / 2, w, h);
-    f.render_widget(Clear, r);
-    r
+    let mut hit = app.hit.borrow_mut();
+    hit.list = Block::bordered().inner(area);
+    hit.offset = state.offset();
+    hit.items = meta;
 }
 
-/// "Idea › Sent › [Call] › ..." with the current stage highlighted.
+/// What the list shows when there is nothing to list.
+fn empty_state(app: &App) -> Vec<Line<'static>> {
+    let pal = app.pal;
+    if !app.query.is_empty() {
+        return vec![
+            Line::from(""),
+            Line::from(format!("No matches for “{}”", app.query)).alignment(Alignment::Center),
+            Line::from(Span::styled("Esc clears the search", pal.dim()))
+                .alignment(Alignment::Center),
+        ];
+    }
+    if app.tab == 2 {
+        return vec![
+            Line::from(""),
+            Line::from("Nothing archived").alignment(Alignment::Center),
+            Line::from(Span::styled(
+                "Press z on an application to archive it",
+                pal.dim(),
+            ))
+            .alignment(Alignment::Center),
+        ];
+    }
+    let row = |k: &str, text: &str| {
+        Line::from(vec![
+            Span::styled(format!("  {k}"), pal.accent().bold()),
+            Span::raw("   "),
+            Span::raw(text.to_string()),
+        ])
+    };
+    vec![
+        Line::from(""),
+        Line::from(Span::styled("◆ Welcome to Jobi", pal.accent().bold()))
+            .alignment(Alignment::Center),
+        Line::from(Span::styled(
+            "Your next career move, one action at a time.",
+            pal.dim(),
+        ))
+        .alignment(Alignment::Center),
+        Line::from(""),
+        row("a", "Add your first application"),
+        row("L", "Load sample data to explore"),
+        row("?", "Learn the keys"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Everything stays on this computer.",
+            pal.dim(),
+        ))
+        .alignment(Alignment::Center),
+    ]
+}
+
+fn details_pane(f: &mut Frame, app: &App, area: Rect) {
+    let pal = app.pal;
+    app.hit.borrow_mut().details = area;
+    let inner = Block::bordered().inner(area);
+    let now = Local::now().date_naive();
+    // The frame pads the text by one column on each side.
+    let width = inner.width.saturating_sub(2);
+    let lines: Vec<Line> = match app.rows.get(app.selected) {
+        Some(a) => {
+            let mut l = vec![
+                Line::from(vec![
+                    Span::styled(a.company.clone(), Style::new().bold()),
+                    if a.archived {
+                        Span::styled("  archived", pal.dim())
+                    } else {
+                        Span::raw("")
+                    },
+                ]),
+                Line::from(Span::styled(a.role.clone(), pal.dim())),
+                Line::from(""),
+                pipeline(&pal, &app.stages, &a.stage),
+                Line::from(""),
+                rule(&pal, "NEXT ACTION", width),
+            ];
+            if a.action.is_empty() {
+                l.push(Line::from(Span::styled(
+                    "None yet. Press e to set one.",
+                    pal.dim(),
+                )));
+            } else {
+                l.push(Line::from(Span::styled(
+                    a.action.clone(),
+                    Style::new().bold(),
+                )));
+                l.push(Line::from(match relative(&a.due, now) {
+                    Some((text, days)) => {
+                        let style = if days < 0 {
+                            pal.danger()
+                        } else if days == 0 {
+                            pal.warn()
+                        } else {
+                            Style::new()
+                        };
+                        vec![
+                            Span::styled("due ", pal.dim()),
+                            Span::styled(text, style),
+                            Span::styled(format!(" · {}", a.due), pal.dim()),
+                        ]
+                    }
+                    None => vec![Span::styled("no due date", pal.dim())],
+                }));
+            }
+            if app.stale.contains(&a.id) {
+                l.push(Line::from(Span::styled(
+                    format!(
+                        "⏳ No activity for {}+ days. Time to follow up?",
+                        app.config.stale_days
+                    ),
+                    pal.warn(),
+                )));
+            }
+            if let Some(o) = &app.offer {
+                l.push(Line::from(""));
+                l.push(rule(&pal, "OFFER", width));
+                l.push(Line::from(Span::styled(o.summary(), pal.ok())));
+            }
+            if !app.tasks.is_empty() {
+                let open = app.tasks.iter().filter(|t| !t.done).count();
+                l.push(Line::from(""));
+                l.push(rule(
+                    &pal,
+                    &format!("TASKS · {open} open of {}", app.tasks.len()),
+                    width,
+                ));
+                for t in &app.tasks {
+                    let due = if t.due.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  ({})", t.due)
+                    };
+                    l.push(Line::from(if t.done {
+                        Span::styled(format!("☑ {}{due}", t.title), pal.dim())
+                    } else {
+                        Span::raw(format!("☐ {}{due}", t.title))
+                    }));
+                }
+            }
+            if !app.contacts.is_empty() {
+                l.push(Line::from(""));
+                l.push(rule(&pal, "CONTACTS", width));
+                for c in &app.contacts {
+                    let extra: Vec<&str> = [&c.role, &c.email, &c.phone]
+                        .into_iter()
+                        .filter(|s| !s.is_empty())
+                        .map(String::as_str)
+                        .collect();
+                    l.push(Line::from(vec![
+                        Span::styled(c.name.clone(), Style::new().bold()),
+                        Span::styled(format!("  {}", extra.join(" · ")), pal.dim()),
+                    ]));
+                }
+            }
+            l.push(Line::from(""));
+            l.push(rule(&pal, "ACTIVITY", width));
+            for h in &app.history {
+                // "2026-11-17 06:32:56 UTC  message"
+                let (when, what) = h.split_once("  ").unwrap_or(("", h));
+                l.push(Line::from(vec![
+                    Span::styled(
+                        format!("{} ", when.chars().take(16).collect::<String>()),
+                        pal.dim(),
+                    ),
+                    Span::raw(what.to_string()),
+                ]));
+            }
+            l
+        }
+        None => vec![
+            Line::from(""),
+            Line::from(Span::styled("Select an application", pal.dim()))
+                .alignment(Alignment::Center),
+            Line::from(""),
+            Line::from(Span::styled("Tips", pal.accent().bold())).alignment(Alignment::Center),
+            Line::from("Search with stage:interview or due:overdue").alignment(Alignment::Center),
+            Line::from("Dates accept today, tomorrow, +3d or fri").alignment(Alignment::Center),
+            Line::from("Press ? for every key").alignment(Alignment::Center),
+        ],
+    };
+    let details = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let total = u16::try_from(details.line_count(width)).unwrap_or(u16::MAX);
+    let max_scroll = total.saturating_sub(inner.height);
+    app.max_scroll.set(max_scroll);
+    let mut block = frame(
+        &pal,
+        "Details",
+        Some(hints(
+            &pal,
+            &[
+                ("p", "post"),
+                ("i", "interview"),
+                ("d", "doc"),
+                ("o", "offer"),
+                ("c", "contact"),
+                ("T", "task"),
+                ("v", "review"),
+            ],
+        )),
+    );
+    if max_scroll > 0 {
+        block =
+            block.title(Line::from(Span::styled(" PgUp/PgDn scroll ", pal.dim())).right_aligned());
+    }
+    f.render_widget(
+        details.scroll((app.scroll.min(max_scroll), 0)).block(block),
+        area,
+    );
+}
+
+fn footer(f: &mut Frame, app: &App, area: Rect) {
+    let pal = app.pal;
+    let rows = Layout::vertical([Constraint::Length(2), Constraint::Length(1)]).split(area);
+    let keys: Vec<(&str, &str)> = match app.mode {
+        Mode::Search => vec![("Enter", "apply"), ("Esc", "clear")],
+        _ => vec![
+            ("a", "add"),
+            ("e", "edit"),
+            ("n", "note"),
+            ("x", "done"),
+            ("s", "stage"),
+            ("u", "undo"),
+            ("z", if app.tab == 2 { "restore" } else { "archive" }),
+            ("?", "help"),
+            ("q", "quit"),
+        ],
+    };
+    f.render_widget(
+        Paragraph::new(hints(&pal, &keys)).wrap(Wrap { trim: true }),
+        rows[0],
+    );
+    let style = if app.status.starts_with("Error") {
+        pal.danger()
+    } else if app.status.starts_with("Nothing") || app.status.starts_with("Local storage") {
+        pal.dim()
+    } else {
+        pal.ok()
+    };
+    f.render_widget(
+        Paragraph::new(Span::styled(format!(" {}", app.status), style)),
+        rows[1],
+    );
+}
+
+/// "● Wishlist  ● Applied  ◉ Screening  ○ Interview ..." with the current stage highlighted.
 fn pipeline(pal: &super::theme::Palette, stages: &Stages, stage: &str) -> Line<'static> {
     let main = stages.pipeline();
     let Some(at) = main.iter().position(|s| *s == stage) else {
         let note = if stages.is_closed(stage) {
-            "  (closed)"
+            "  closed"
         } else {
-            "  (not one of your configured stages)"
+            "  not one of your configured stages"
         };
-        return Line::from(vec![
-            Span::styled(format!("● {stage}"), pal.stage_in(stages, stage).bold()),
-            Span::styled(note, pal.dim()),
-        ]);
+        return Line::from(vec![pal.chip(stages, stage), Span::styled(note, pal.dim())]);
     };
     let mut spans = vec![];
     for (i, name) in main.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled(" › ", pal.dim()));
+            spans.push(Span::raw("  "));
         }
-        spans.push(if i == at {
-            Span::styled(format!("[{name}]"), pal.stage_in(stages, stage).bold())
-        } else {
-            Span::styled(name.to_string(), pal.dim())
+        spans.push(match i.cmp(&at) {
+            std::cmp::Ordering::Less => Span::styled(format!("● {name}"), pal.dim()),
+            std::cmp::Ordering::Equal => {
+                Span::styled(format!("◉ {name}"), pal.stage_in(stages, stage).bold())
+            }
+            std::cmp::Ordering::Greater => Span::styled(format!("○ {name}"), pal.dim()),
         });
     }
     Line::from(spans)
 }
-
-const HELP: &str = "VIEWS
-1/2/3, Tab  Switch views
-j/k, ↑/↓    Select (mouse: click, wheel)
-/           Search: words, stage:offer,
-            due:overdue|today|week|none
-
-APPLICATIONS
-a / e       Add / edit application
-n / x       Add a note / complete next action
-s / S       Next / previous stage
-u           Undo last x, z or s
-z           Archive / restore
-t           Pipeline statistics
-
-DETAILS
-p / i / d   Posting / interview / link document
-o / c / T   Offer / contact / task
-v           Review everything: j/k select,
-            Space done, e edit interview,
-            r remove or unlink
-Ctrl+E      In a form or note: edit in $EDITOR
-PgUp/PgDn   Scroll details and history
-q, Ctrl+C   Exit
-
-History times are UTC.";

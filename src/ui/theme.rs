@@ -64,6 +64,43 @@ impl Palette {
             Kind::Mono => Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD),
         }
     }
+    pub fn border(self) -> Style {
+        match self.0 {
+            Kind::Dark => Style::new().fg(Color::DarkGray),
+            Kind::Light => Style::new().fg(Color::Gray),
+            Kind::Mono => Style::new(),
+        }
+    }
+    pub fn ok(self) -> Style {
+        match self.0 {
+            Kind::Mono => Style::new(),
+            _ => self.pick(Color::Green, Color::Rgb(0, 120, 0)),
+        }
+    }
+    /// A key name drawn like a keycap.
+    pub fn key(self) -> Style {
+        match self.0 {
+            Kind::Dark => Style::new().fg(Color::Black).bg(Color::Gray),
+            Kind::Light => Style::new().fg(Color::White).bg(Color::DarkGray),
+            Kind::Mono => Style::new().add_modifier(Modifier::REVERSED),
+        }
+    }
+    /// A stage name drawn as a coloured tag (`[Name]` without colour).
+    pub fn chip(self, stages: &crate::stages::Stages, name: &str) -> Span<'static> {
+        let base = self.stage_in(stages, name);
+        match self.0 {
+            Kind::Mono => Span::styled(format!("[{name}]"), Style::new().bold()),
+            kind => {
+                let bg = base.fg.unwrap_or(Color::Gray);
+                let fg = if kind == Kind::Light || matches!(bg, Color::DarkGray | Color::Red) {
+                    Color::White
+                } else {
+                    Color::Black
+                };
+                Span::styled(format!(" {name} "), Style::new().fg(fg).bg(bg))
+            }
+        }
+    }
     pub fn tab_idle(self) -> Style {
         self.pick(Color::Gray, Color::DarkGray)
     }

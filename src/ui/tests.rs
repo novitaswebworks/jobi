@@ -46,7 +46,7 @@ fn layouts_and_form_render_at_supported_sizes() -> Result<()> {
                 .map(|c| c.symbol())
                 .collect();
             assert!(content.contains("Company *"));
-            assert!(content.contains("Save"));
+            assert!(content.contains("save"));
         }
     }
     Ok(())
@@ -167,9 +167,11 @@ fn today_groups_header_counts_stage_keys_and_undo() -> Result<()> {
             "Overdue",
             "This week",
             "Later",
-            "[Applied]",
+            "◉ Applied",
         ] {
             assert!(out.contains(want), "{theme}: missing {want}");
+            // Section rules must fill their own row instead of wrapping onto the next one.
+            assert!(out.contains("NEXT ACTION ─"), "{theme}: rule wrapped");
         }
         if theme == "mono" {
             // No colour anywhere: only modifiers.
@@ -417,7 +419,7 @@ fn custom_stages_drive_the_pipeline_keys_and_legacy_handling() -> Result<()> {
     t.draw(|f| draw(f, &app, &store))?;
     let out = text(&t);
     assert!(
-        out.contains("Idea") && out.contains("[Sent]") && out.contains("Hired"),
+        out.contains("Idea") && out.contains("◉ Sent") && out.contains("Hired"),
         "{out}"
     );
     assert!(!out.contains("Wishlist") && !out.contains("Screening"));
@@ -432,7 +434,7 @@ fn custom_stages_drive_the_pipeline_keys_and_legacy_handling() -> Result<()> {
     assert_eq!(stage_of(&store, id), "Declined");
     app.refresh(&store)?;
     t.draw(|f| draw(f, &app, &store))?;
-    assert!(text(&t).contains("(closed)"));
+    assert!(text(&t).contains("closed"));
     press(&mut app, &mut store, KeyCode::Char('s'));
     assert!(app.status.contains("No further stage"), "{}", app.status);
     // A leftover stage is flagged and `s` refuses to guess.

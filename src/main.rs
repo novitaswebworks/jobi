@@ -1,6 +1,7 @@
 mod config;
 mod dates;
 mod portable;
+mod stats;
 mod store;
 mod ui;
 use anyhow::{Result, bail};
@@ -14,6 +15,9 @@ struct Cli {
     /// Override the local database location (also useful for demos)
     #[arg(long, global = true)]
     db: Option<PathBuf>,
+    /// Machine-readable JSON output for list, today, history, interviews, documents, status and stats
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -27,6 +31,14 @@ enum Command {
         #[arg(long)]
         quiet: bool,
     },
+    /// Pipeline statistics: stage counts, progress and applications added per week
+    Stats,
+    /// Load example applications into an empty database
+    Sample,
+    /// Print a shell completion script (bash, zsh, fish, elvish, powershell)
+    Completions { shell: clap_complete::Shell },
+    /// Print the man page (roff) to stdout
+    Man,
     /// Send a desktop notification when actions are overdue or due today (cron-friendly)
     Notify,
     /// List applications
@@ -153,6 +165,23 @@ fn main() -> Result<()> {
         Some(p) => p,
         None => default_path()?,
     };
+    match &cli.command {
+        Some(Command::Completions { shell }) => {
+            clap_complete::generate(
+                *shell,
+                &mut <Cli as clap::CommandFactory>::command(),
+                "jobi",
+                &mut std::io::stdout(),
+            );
+            return Ok(());
+        }
+        Some(Command::Man) => {
+            clap_mangen::Man::new(<Cli as clap::CommandFactory>::command())
+                .render(&mut std::io::stdout())?;
+            return Ok(());
+        }
+        _ => {}
+    }
     if matches!(cli.command, Some(Command::Path)) {
         println!("{}", path.display());
         return Ok(());
@@ -179,11 +208,35 @@ fn main() -> Result<()> {
             _ => ui::run(&mut store, true, &config)?,
         },
         Some(Command::Status { quiet }) => {
-            let (line, urgent) = due_summary(&store.list(false)?);
-            if urgent > 0 || !quiet {
+            let rows = store.list(false)?;
+            let (line, urgent) = due_summary(&rows);
+            if cli.json {
+                let (overdue, due_today) =
+                    store::due_counts(&rows, &today().format("%Y-%m-%d").to_string());
+                let open = rows.iter().filter(|a| !a.action.is_empty()).count();
+                println!(
+                    "{}",
+                    serde_json::json!({"overdue": overdue, "due_today": due_today, "open": open})
+                );
+            } else if urgent > 0 || !quiet {
                 println!("{line}");
             }
         }
+        Some(Command::Stats) => {
+            let st = stats::compute(&store)?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&st)?);
+            } else {
+                print!("{}", stats::render(&st));
+            }
+        }
+        Some(Command::Sample) => {
+            println!(
+                "Loaded {} sample applications",
+                stats::load_sample(&mut store, today())?
+            );
+        }
+        Some(Command::Completions { .. } | Command::Man) => unreachable!(),
         Some(Command::Notify) => {
             let (line, urgent) = due_summary(&store.list(false)?);
             if urgent > 0 {
@@ -193,12 +246,17 @@ fn main() -> Result<()> {
         Some(Command::Today) => {
             let mut rows = store.list(false)?;
             ui::order_actions(&mut rows);
-            print_rows(&rows);
+            print_rows(&rows, cli.json)?;
         }
-        Some(Command::List { archived }) => print_rows(&store.list(archived)?),
+        Some(Command::List { archived }) => print_rows(&store.list(archived)?, cli.json)?,
         Some(Command::History { id }) => {
-            for line in store.history(id)? {
-                println!("{line}");
+            let lines = store.history(id)?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&lines)?);
+            } else {
+                for line in lines {
+                    println!("{line}");
+                }
             }
         }
         Some(Command::Done { id }) => {
@@ -244,13 +302,25 @@ fn main() -> Result<()> {
             println!("Document linked to #{id}");
         }
         Some(Command::Documents { id }) => {
-            for d in store.documents(id)? {
+            let docs = store.documents(id)?;
+            if cli.json {
+                let v: Vec<_> = docs
+                    .iter()
+                    .map(|d| serde_json::json!({"id": d.id, "label": d.label, "path": d.path, "missing": d.missing()}))
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            }
+            for d in docs.iter().filter(|_| !cli.json) {
                 let note = if d.missing() { "\t(file missing)" } else { "" };
                 println!("{}\t{}\t{}{note}", d.id, d.label, d.path);
             }
         }
         Some(Command::Interviews { id }) => {
-            for i in store.interviews(id)? {
+            let ivs = store.interviews(id)?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&ivs)?);
+            }
+            for i in ivs.iter().filter(|_| !cli.json) {
                 println!(
                     "{}\t{}\t{}\t{}\t{}\t{}",
                     i.id,
@@ -382,10 +452,14 @@ fn notify(title: &str, body: &str) {
         println!("{title}: {body}");
     }
 }
-fn print_rows(rows: &[store::Application]) {
+fn print_rows(rows: &[store::Application], json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(rows)?);
+        return Ok(());
+    }
     if rows.is_empty() {
         println!("Nothing here yet. Run `jobi add` to get started.");
-        return;
+        return Ok(());
     }
     println!("ID\tCOMPANY\tROLE\tSTAGE\tDUE\tNEXT ACTION");
     for a in rows {
@@ -394,4 +468,5 @@ fn print_rows(rows: &[store::Application]) {
             a.id, a.company, a.role, a.stage, a.due, a.action
         );
     }
+    Ok(())
 }

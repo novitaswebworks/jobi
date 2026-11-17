@@ -80,6 +80,8 @@ enum Mode {
     Inspect(usize, usize),
     /// is_interview, id, label
     Remove(bool, i64, String),
+    /// rendered pipeline statistics
+    Stats(String),
 }
 /// Fields that hold long text and can be edited in $VISUAL/$EDITOR.
 fn multiline(kind: usize, field: usize) -> bool {
@@ -352,6 +354,7 @@ fn handle(app: &mut App, store: &mut Store, key: KeyEvent) -> Result<bool> {
             }
             _ => {}
         },
+        Mode::Stats(_) => app.mode = Mode::Browse,
         Mode::Inspect(row, sel) => {
             let Some(aid) = app.rows.get(*row).map(|a| a.id) else {
                 app.mode = Mode::Browse;
@@ -524,6 +527,14 @@ fn handle(app: &mut App, store: &mut Store, key: KeyEvent) -> Result<bool> {
                 }
                 None => app.status = "Nothing to undo".into(),
             },
+            KeyCode::Char('t') => {
+                app.mode = Mode::Stats(crate::stats::render(&crate::stats::compute(store)?));
+            }
+            KeyCode::Char('L') => {
+                let n = crate::stats::load_sample(store, Local::now().date_naive())?;
+                app.tab = 0;
+                app.status = format!("Loaded {n} sample applications");
+            }
             KeyCode::Char('?') => app.mode = Mode::Help,
             _ => {}
         },
@@ -820,6 +831,44 @@ mod tests {
         );
         handle(&mut app, &mut store, key('u'))?;
         assert_eq!(app.status, "Nothing to undo");
+        Ok(())
+    }
+    #[test]
+    fn stats_popup_and_sample_key_render() -> Result<()> {
+        use ratatui::backend::TestBackend;
+        let mut store = Store::initialize(rusqlite::Connection::open_in_memory()?)?;
+        let config = Config::default();
+        let mut app = App {
+            tab: 0,
+            query: String::new(),
+            selected: 0,
+            rows: vec![],
+            history: vec![],
+            scroll: 0,
+            mode: Mode::Browse,
+            status: String::new(),
+            config: config.clone(),
+            pal: Palette::new(&config),
+            overdue: 0,
+            due_today: 0,
+            undo: None,
+            editor: false,
+            max_scroll: Cell::new(0),
+        };
+        app.refresh(&store)?;
+        let mut t = Terminal::new(TestBackend::new(100, 30))?;
+        t.draw(|f| draw(f, &app, &store))?;
+        assert!(text(&t).contains("Load sample data"));
+        handle(&mut app, &mut store, key('L'))?;
+        app.refresh(&store)?;
+        assert_eq!(app.rows.len(), 3);
+        handle(&mut app, &mut store, key('t'))?;
+        t.draw(|f| draw(f, &app, &store))?;
+        let out = text(&t);
+        assert!(out.contains("Pipeline statistics") && out.contains("Applications: 4"));
+        // The sample loader refuses a database that already has data.
+        app.mode = Mode::Browse;
+        assert!(handle(&mut app, &mut store, key('L')).is_err());
         Ok(())
     }
 }

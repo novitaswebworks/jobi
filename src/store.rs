@@ -13,7 +13,7 @@ pub const STAGES: &[&str] = &[
     "Rejected",
     "Withdrawn",
 ];
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Application {
     pub id: i64,
     pub company: String,
@@ -67,7 +67,7 @@ fn migrate(db: &Connection, target: usize) -> Result<()> {
     Ok(())
 }
 pub struct Store(pub Connection);
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Interview {
     pub id: i64,
     pub starts_at: String,
@@ -76,7 +76,7 @@ pub struct Interview {
     pub url: String,
     pub notes: String,
 }
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Document {
     pub id: i64,
     pub label: String,

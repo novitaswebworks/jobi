@@ -120,7 +120,7 @@ pub(super) fn draw(f: &mut Frame, app: &App, store: &Store) {
         }
     );
     if items.is_empty() {
-        f.render_widget(Paragraph::new(if app.query.is_empty(){"Nothing here yet.\n\n[a] Add an application\n[2] Browse all applications\n\nToday shows open actions, with overdue and upcoming dates first."}else{"No matching applications. Esc clears search."}).wrap(Wrap{trim:false}).block(Block::bordered().title(title)),panes[0]);
+        f.render_widget(Paragraph::new(if app.query.is_empty(){"Nothing here yet.\n\n[a] Add an application\n[L] Load sample data (empty database only)\n[2] Browse all applications\n\nToday shows open actions, with overdue and upcoming dates first."}else{"No matching applications. Esc clears search."}).wrap(Wrap{trim:false}).block(Block::bordered().title(title)),panes[0]);
     } else {
         let mut state = ListState::default().with_selected(Some(shown_selected));
         f.render_stateful_widget(
@@ -264,7 +264,7 @@ pub(super) fn draw(f: &mut Frame, app: &App, store: &Store) {
             let r = popup(f, 70, 18);
             f.render_widget(
                 Paragraph::new(
-                    "1/2/3, Tab  Switch views\nj/k, ↑/↓    Select application\n/           Search (Esc clears)\na / e       Add / edit application\nn           Add a dated note\nx           Complete next action\ns / S       Next / previous stage\nu           Undo last x, z or s\nz           Archive / restore\np / i / d   Posting / interview / link document\nv           Details: j/k select, e edit interview,\n            r remove interview / unlink document\nCtrl+E      In a form: edit long text in $EDITOR\nPgUp/PgDn   Scroll details and history\nq, Ctrl+C   Exit\nAny key closes. History times are UTC.",
+                    "1/2/3, Tab  Switch views\nj/k, ↑/↓    Select application\n/           Search (Esc clears)\na / e       Add / edit application\nn / x       Add a note / complete next action\ns / S       Next / previous stage\nu           Undo last x, z or s\nz           Archive / restore\nt           Pipeline statistics\np / i / d   Posting / interview / link document\nv           Details: j/k select, e edit interview,\n            r remove interview / unlink document\nCtrl+E      In a form: edit long text in $EDITOR\nPgUp/PgDn   Scroll details and history\nq, Ctrl+C   Exit\nAny key closes. History times are UTC.",
                 )
                 .block(Block::bordered().title(" Keyboard help ")),
                 r,
@@ -359,6 +359,14 @@ pub(super) fn draw(f: &mut Frame, app: &App, store: &Store) {
                     r,
                 );
             }
+        }
+        Mode::Stats(text) => {
+            let r = popup(f, 60, 24);
+            f.render_widget(
+                Paragraph::new(format!("{text}\nAny key closes"))
+                    .block(Block::bordered().title(" Pipeline statistics ")),
+                r,
+            );
         }
         Mode::Remove(is_interview, _, label) => {
             let r = popup(f, 60, 7);

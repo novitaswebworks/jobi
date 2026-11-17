@@ -67,6 +67,24 @@ impl Palette {
     pub fn tab_idle(self) -> Style {
         self.pick(Color::Gray, Color::DarkGray)
     }
+    /// Style for a stage of the configured list: well-known names keep their colour,
+    /// closed stages are dimmed, other stages cycle through the palette by position, and
+    /// a stage that is no longer configured stands out.
+    pub fn stage_in(self, stages: &crate::stages::Stages, name: &str) -> Style {
+        if crate::stages::DEFAULT_STAGES.contains(&name) {
+            return self.stage(name);
+        }
+        match stages.position(name) {
+            _ if stages.is_closed(name) => self.dim(),
+            Some(i) => match i % 4 {
+                0 => self.pick(Color::LightBlue, Color::Blue),
+                1 => self.pick(Color::Cyan, Color::Rgb(0, 120, 140)),
+                2 => self.warn(),
+                _ => self.pick(Color::LightGreen, Color::Rgb(0, 120, 0)),
+            },
+            None => self.warn(),
+        }
+    }
     pub fn stage(self, stage: &str) -> Style {
         match stage {
             "Wishlist" | "Withdrawn" => self.dim(),

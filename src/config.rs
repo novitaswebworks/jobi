@@ -1,5 +1,5 @@
 //! Optional user configuration (`config.toml`) and platform directories.
-use crate::store::STAGES;
+use crate::stages::{StageOptions, Stages};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -13,6 +13,17 @@ pub struct Config {
     pub default_timezone: Option<String>,
     /// Stage preselected when adding an application.
     pub default_stage: String,
+    /// Ordered stage names (default: Wishlist, Applied, Screening, Interview, Offer,
+    /// Accepted, Rejected, Withdrawn). The first is "not yet applied".
+    pub stages: Option<Vec<String>>,
+    /// Finished stages, shown as closed and never stale (default: Rejected, Withdrawn).
+    pub closed_stages: Option<Vec<String>>,
+    /// Stages where inactivity makes an application stale (derived when omitted).
+    pub stale_stages: Option<Vec<String>>,
+    /// Stages counted as progress in statistics (derived when omitted).
+    pub advanced_stages: Option<Vec<String>>,
+    /// Stage whose new applications get the automatic follow-up (default: the second stage).
+    pub follow_up_stage: Option<String>,
     /// "dark", "light" or "mono" (no colour; also used when NO_COLOR is set).
     pub theme: String,
     /// Active applications with no activity for this many days are flagged as stale.
@@ -28,6 +39,11 @@ impl Default for Config {
         Self {
             default_timezone: None,
             default_stage: "Applied".into(),
+            stages: None,
+            closed_stages: None,
+            stale_stages: None,
+            advanced_stages: None,
+            follow_up_stage: None,
             theme: "dark".into(),
             stale_days: 14,
             follow_up_days: 7,
@@ -69,9 +85,11 @@ pub fn config_path() -> Option<PathBuf> {
 
 impl Config {
     pub fn parse(text: &str) -> Result<Self> {
-        let c: Config = toml::from_str(text).context("Invalid config")?;
-        if !STAGES.contains(&c.default_stage.as_str()) {
-            bail!("default_stage must be one of: {}", STAGES.join(", "));
+        let mut c: Config = toml::from_str(text).context("Invalid config")?;
+        let stages = c.stages()?;
+        match stages.canonical(&c.default_stage) {
+            Some(s) => c.default_stage = s.to_string(),
+            None => bail!("default_stage must be one of: {}", stages.all.join(", ")),
         }
         if !THEMES.contains(&c.theme.as_str()) {
             bail!("theme must be one of: {}", THEMES.join(", "));
@@ -95,17 +113,29 @@ impl Config {
         }
     }
 
+    /// The configured stages, validated.
+    pub fn stages(&self) -> Result<Stages> {
+        Stages::build(&StageOptions {
+            stages: self.stages.clone(),
+            closed: self.closed_stages.clone(),
+            stale: self.stale_stages.clone(),
+            advanced: self.advanced_stages.clone(),
+            follow_up: self.follow_up_stage.clone(),
+        })
+    }
+
     /// Returns (action, due) for a new application, adding the automatic follow-up when
-    /// it was added as Applied with neither an action nor a due date.
+    /// it was added in the follow-up stage with neither an action nor a due date.
     pub fn with_follow_up(
         &self,
+        stages: &Stages,
         stage: &str,
         action: &str,
         due: &str,
         today: chrono::NaiveDate,
     ) -> (String, String) {
         if self.auto_follow_up
-            && stage == "Applied"
+            && stage == stages.follow_up
             && action.trim().is_empty()
             && due.trim().is_empty()
         {
@@ -144,22 +174,45 @@ mod tests {
         assert!(!Config::default().timezone().is_empty());
         let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 17).unwrap();
         let d = Config::default();
+        let st = d.stages().unwrap();
         assert_eq!(
-            d.with_follow_up("Applied", "", "", today),
+            d.with_follow_up(&st, "Applied", "", "", today),
             ("Follow up".into(), "2026-11-24".into())
         );
         assert_eq!(
-            d.with_follow_up("Applied", "Call", "", today),
+            d.with_follow_up(&st, "Applied", "Call", "", today),
             ("Call".into(), String::new())
         );
         assert_eq!(
-            d.with_follow_up("Wishlist", "", "", today),
+            d.with_follow_up(&st, "Wishlist", "", "", today),
             (String::new(), String::new())
         );
         let off = Config::parse("auto_follow_up = false").unwrap();
         assert_eq!(
-            off.with_follow_up("Applied", "", "", today),
+            off.with_follow_up(&st, "Applied", "", "", today),
             (String::new(), String::new())
+        );
+    }
+
+    #[test]
+    fn custom_stages_in_config() {
+        let c = Config::parse(
+            "stages = [\"Idea\", \"Sent\", \"Call\", \"Hired\", \"Declined\"]\nclosed_stages = [\"declined\"]\ndefault_stage = \"sent\"\nfollow_up_stage = \"Sent\"",
+        )
+        .unwrap();
+        assert_eq!(c.default_stage, "Sent"); // stored with the configured spelling
+        let s = c.stages().unwrap();
+        assert_eq!(s.all.len(), 5);
+        assert_eq!(s.closed, ["Declined"]);
+        assert_eq!(s.stale, ["Sent", "Call"]);
+        let err = Config::parse("stages = [\"A\", \"B\"]")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("default_stage must be one of: A, B"), "{err}");
+        assert!(Config::parse("stages = [\"A\"]\ndefault_stage = \"A\"").is_err());
+        assert!(
+            Config::parse("stages = [\"A\", \"B\"]\ndefault_stage = \"A\"\nstale_stages = [\"Z\"]")
+                .is_err()
         );
     }
 }

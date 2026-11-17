@@ -3,6 +3,7 @@ mod dates;
 mod extras;
 mod ical;
 mod portable;
+mod stages;
 mod stats;
 mod store;
 mod ui;
@@ -261,6 +262,8 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Show the configured stages, what each is used for, and how many applications are in each
+    Stages,
     /// Print the database location
     Path,
 }
@@ -302,6 +305,7 @@ fn main() -> Result<()> {
     }
     let config = config::Config::load()?;
     let mut store = Store::open(&path)?;
+    store.set_stages(config.stages()?);
     match cli.command {
         None => ui::run(&mut store, false, &config)?,
         Some(Command::Add {
@@ -314,7 +318,8 @@ fn main() -> Result<()> {
             (Some(c), Some(r)) => {
                 let due = dates::resolve_due(&due, today())?;
                 let stage = stage.unwrap_or_else(|| config.default_stage.clone());
-                let (action, due) = config.with_follow_up(&stage, &action, &due, today());
+                let (action, due) =
+                    config.with_follow_up(store.stages(), &stage, &action, &due, today());
                 let id = store.save(None, &c, &r, &stage, &action, &due)?;
                 println!("Added application #{id}");
                 if !action.is_empty() && !due.is_empty() {
@@ -631,7 +636,7 @@ fn main() -> Result<()> {
             apply,
             allow_duplicates,
         }) => {
-            let (rows, errors) = portable::parse_csv(&path)?;
+            let (rows, errors) = portable::parse_csv(&path, store.stages(), &config.default_stage)?;
             for r in rows.iter().take(10) {
                 println!("line {}: {} · {} [{}]", r.line, r.company, r.role, r.stage);
             }
@@ -704,6 +709,39 @@ fn main() -> Result<()> {
         }) => {
             let n = ical::export(&store, &path, actions, force)?;
             println!("Exported {n} calendar event(s) to {}", path.display());
+        }
+        Some(Command::Stages) => {
+            let st = stats::compute(&store)?;
+            let s = store.stages();
+            let role = |name: &str| {
+                let mut r = vec![];
+                if s.is_closed(name) {
+                    r.push("closed");
+                }
+                if s.stale.iter().any(|x| x == name) {
+                    r.push("stale-checked");
+                }
+                if s.advanced.iter().any(|x| x == name) {
+                    r.push("advanced");
+                }
+                if s.follow_up == name {
+                    r.push("auto follow-up");
+                }
+                r.join(", ")
+            };
+            if cli.json {
+                let v: Vec<_> = st
+                    .by_stage
+                    .iter()
+                    .map(|(n, c)| serde_json::json!({"stage": n, "count": c, "configured": s.contains(n), "roles": role(n)}))
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            } else {
+                println!("STAGE\tAPPLICATIONS\tROLES");
+                for (n, c) in &st.by_stage {
+                    println!("{n}\t{c}\t{}", role(n));
+                }
+            }
         }
         Some(Command::Path) => unreachable!(),
     }

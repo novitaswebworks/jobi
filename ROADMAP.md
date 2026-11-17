@@ -12,12 +12,13 @@
 - [x] MIT license, changelog, release workflow
 - [x] Private document copies can be embedded in backups (`--include-documents`)
 - [x] `notify` and `status -v` name the due actions, not just counts
+- [x] Configurable stages
 
 ## Next
 
 - [ ] Real-user feedback on the daily workflow (the most valuable input right now)
 - [ ] Manual testing on Linux and Windows terminals (CI covers tests, not feel)
-- [ ] Configurable stages and keybindings
+- [ ] Configurable keybindings
 - [ ] Re-check package and executable names on crates.io and Homebrew before publishing; add a Homebrew formula
 
 Do not add email sync, job scraping, or AI features before validating the core workflow.

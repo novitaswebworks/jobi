@@ -8,23 +8,22 @@ pub(super) fn handle(app: &mut App, store: &mut Store, key: KeyEvent) -> Result<
             KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % 5,
             KeyCode::BackTab | KeyCode::Up => form.field = (form.field + 4) % 5,
             KeyCode::Left | KeyCode::Right if form.field == 2 => {
-                let i = STAGES
-                    .iter()
-                    .position(|s| *s == form.values[2])
-                    .unwrap_or(0);
+                let all = &app.stages.all;
+                let i = app.stages.position(&form.values[2]).unwrap_or(0);
                 let next = if key.code == KeyCode::Right {
-                    (i + 1) % STAGES.len()
+                    (i + 1) % all.len()
                 } else {
-                    (i + STAGES.len() - 1) % STAGES.len()
+                    (i + all.len() - 1) % all.len()
                 };
-                form.values[2] = STAGES[next].into();
+                form.values[2] = all[next].clone();
             }
             KeyCode::Enter => {
                 let v = &form.values;
                 let today = chrono::Local::now().date_naive();
                 let saved = resolve_due(&v[4], today).and_then(|due| {
                     let (action, due) = if form.id.is_none() {
-                        app.config.with_follow_up(&v[2], &v[3], &due, today)
+                        app.config
+                            .with_follow_up(&app.stages, &v[2], &v[3], &due, today)
                     } else {
                         (v[3].clone(), due)
                     };
@@ -345,11 +344,18 @@ pub(super) fn handle(app: &mut App, store: &mut Store, key: KeyEvent) -> Result<
             }
             KeyCode::Char(c @ ('s' | 'S')) => {
                 if let Some(a) = app.rows.get(app.selected) {
-                    let i = STAGES.iter().position(|x| *x == a.stage).unwrap_or(0);
+                    let Some(i) = app.stages.position(&a.stage) else {
+                        app.status = format!(
+                            "'{}' is not one of your configured stages: press e to choose one",
+                            a.stage
+                        );
+                        return Ok(false);
+                    };
                     let next = if c == 's' { i + 1 } else { i.wrapping_sub(1) };
-                    match STAGES.get(next) {
+                    match app.stages.all.get(next) {
                         Some(stage) => {
-                            let old = store.set_stage(a.id, stage)?;
+                            let stage = stage.clone();
+                            let old = store.set_stage(a.id, &stage)?;
                             app.undo = Some(Undo::Stage(a.id, old));
                             app.status = format!("Stage → {stage} · u to undo");
                         }

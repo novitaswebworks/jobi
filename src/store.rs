@@ -1,18 +1,9 @@
+use crate::stages::Stages;
 use anyhow::{Context, Result, bail};
 use chrono::NaiveDate;
 use rusqlite::{Connection, params};
 use std::path::Path;
 
-pub const STAGES: &[&str] = &[
-    "Wishlist",
-    "Applied",
-    "Screening",
-    "Interview",
-    "Offer",
-    "Accepted",
-    "Rejected",
-    "Withdrawn",
-];
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Application {
     pub id: i64,
@@ -78,7 +69,8 @@ fn migrate(db: &Connection, target: usize) -> Result<()> {
     }
     Ok(())
 }
-pub struct Store(pub Connection);
+/// The database plus the configured stage list used to validate stage names.
+pub struct Store(pub Connection, pub Stages);
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Interview {
     pub id: i64,
@@ -125,7 +117,13 @@ impl Store {
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.execute_batch("PRAGMA foreign_keys=ON;")?;
         migrate(&db, MIGRATIONS.len())?;
-        Ok(Self(db))
+        Ok(Self(db, Stages::default()))
+    }
+    pub fn stages(&self) -> &Stages {
+        &self.1
+    }
+    pub fn set_stages(&mut self, stages: Stages) {
+        self.1 = stages;
     }
     pub(crate) fn require_app(&self, id: i64) -> Result<()> {
         let n: i64 =
@@ -305,7 +303,13 @@ impl Store {
         due: &str,
     ) -> Result<i64> {
         let (company, role, action, due) = (company.trim(), role.trim(), action.trim(), due.trim());
-        validate_app(company, role, stage, action, due)?;
+        validate_fields(company, role, action, due)?;
+        // Accept any capitalisation of a configured stage and store the configured spelling.
+        let stage = self.1.canonical(stage).unwrap_or(stage).to_string();
+        let stage = stage.as_str();
+        if id.is_none() {
+            self.1.check(stage)?;
+        }
         let tx = self.0.transaction()?;
         let result;
         let message;
@@ -315,6 +319,10 @@ impl Store {
                 [id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )?;
+            // An application may keep a stage that is no longer configured, but cannot move to one.
+            if old.2 != stage {
+                self.1.check(stage)?;
+            }
             let mut changes = Vec::new();
             if old.0 != company {
                 changes.push(format!("Company: {} → {company}", old.0));
@@ -390,20 +398,27 @@ impl Store {
     }
     /// Open applications (Applied through Offer) with no activity for `days` days.
     pub fn stale_ids(&self, days: u32) -> Result<std::collections::HashSet<i64>> {
-        let mut q = self.0.prepare(
+        let stale = &self.1.stale;
+        if stale.is_empty() {
+            return Ok(Default::default());
+        }
+        let marks = vec!["?"; stale.len()].join(",");
+        let mut q = self.0.prepare(&format!(
             "SELECT a.id FROM applications a
-             WHERE a.archived=0 AND a.stage IN ('Applied','Screening','Interview','Offer')
+             WHERE a.archived=0 AND a.stage IN ({marks})
                AND COALESCE((SELECT MAX(at) FROM activity WHERE application_id=a.id),'0')
-                   < strftime('%Y-%m-%d %H:%M:%S','now',?)",
-        )?;
-        Ok(q.query_map([format!("-{days} days")], |r| r.get(0))?
+                   < strftime('%Y-%m-%d %H:%M:%S','now',?)"
+        ))?;
+        let mut args: Vec<String> = stale.clone();
+        args.push(format!("-{days} days"));
+        Ok(q.query_map(rusqlite::params_from_iter(args), |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?)
     }
     /// Moves an application to another stage and records it; returns the previous stage.
     pub fn set_stage(&mut self, id: i64, stage: &str) -> Result<String> {
-        if !STAGES.contains(&stage) {
-            bail!("Unknown application stage '{stage}'");
-        }
+        let stage = self.1.canonical(stage).unwrap_or(stage).to_string();
+        let stage = stage.as_str();
+        self.1.check(stage)?;
         let tx = self.0.transaction()?;
         let old: String = tx
             .query_row("SELECT stage FROM applications WHERE id=?", [id], |r| {
@@ -474,12 +489,10 @@ pub fn due_counts(rows: &[Application], today: &str) -> (usize, usize) {
         open.filter(|a| a.due == today).count(),
     )
 }
-pub fn validate_app(company: &str, role: &str, stage: &str, action: &str, due: &str) -> Result<()> {
+/// Checks everything about an application except its stage name.
+pub fn validate_fields(company: &str, role: &str, action: &str, due: &str) -> Result<()> {
     if company.is_empty() || role.is_empty() {
         bail!("Company and role are required");
-    }
-    if !STAGES.contains(&stage) {
-        bail!("Unknown application stage '{stage}'");
     }
     validate_due(due)?;
     if !due.is_empty() && action.is_empty() {
@@ -657,6 +670,11 @@ mod tests {
         assert_eq!(s.set_stage(a, "Interview")?, "Applied");
         assert!(s.history(a)?[0].contains("Applied → Interview"));
         assert!(s.set_stage(a, "Nope").is_err() && s.set_stage(99, "Offer").is_err());
+        assert_eq!(s.set_stage(a, "oFFer")?, "Interview"); // any capitalisation, stored as configured
+        assert_eq!(
+            s.list(false)?.iter().find(|x| x.id == a).unwrap().stage,
+            "Offer"
+        );
         // Stale = no activity within the window; fresh activity clears it.
         assert_eq!(s.stale_ids(14)?.len(), 0);
         s.0.execute(
@@ -700,6 +718,43 @@ mod tests {
         );
         assert_eq!(s.list(false)?[0].stage, "Applied");
         assert_eq!(s.history(id)?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn custom_stages_validate_new_moves_but_tolerate_existing_ones() -> Result<()> {
+        let mut s = Store::initialize(Connection::open_in_memory()?)?;
+        // Data created under the default stages...
+        let id = s.save(None, "Acme", "Eng", "Interview", "Call", "")?;
+        s.0.execute("UPDATE activity SET at='2020-01-01 00:00:00'", [])?;
+        // ...then the user configures different stages.
+        let custom = crate::config::Config::parse(
+            "stages = [\"Idea\", \"Sent\", \"Call\", \"Hired\"]\ndefault_stage = \"Sent\"",
+        )?
+        .stages()?;
+        s.set_stages(custom);
+        let err = s
+            .save(None, "New", "Eng", "Applied", "", "")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("Unknown application stage 'Applied'")
+                && err.contains("Idea, Sent, Call, Hired")
+        );
+        s.save(None, "New", "Eng", "Sent", "", "")?;
+        // The old application can still be edited while it keeps its stage...
+        s.save(Some(id), "Acme", "Eng", "Interview", "Call back", "")?;
+        // ...but cannot be moved to another unknown stage, only to a configured one.
+        assert!(s.save(Some(id), "Acme", "Eng", "Rejected", "", "").is_err());
+        assert!(s.set_stage(id, "Offer").is_err());
+        s.set_stage(id, "Call")?;
+        // Staleness follows the configured stale stages (Sent and Call).
+        s.0.execute("UPDATE activity SET at='2020-01-01 00:00:00'", [])?;
+        assert_eq!(s.stale_ids(14)?.len(), 2);
+        let mut only_call = s.stages().clone();
+        only_call.stale = vec!["Call".into()];
+        s.set_stages(only_call);
+        assert_eq!(s.stale_ids(14)?.into_iter().collect::<Vec<_>>(), [id]);
         Ok(())
     }
 }

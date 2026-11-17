@@ -1,5 +1,5 @@
 //! Pipeline statistics and sample data.
-use crate::store::{STAGES, Store};
+use crate::store::Store;
 use anyhow::{Result, bail};
 use chrono::{Duration, NaiveDate};
 use serde::Serialize;
@@ -27,10 +27,25 @@ pub fn compute(store: &Store) -> Result<Stats> {
             .filter(|a| names.contains(&a.stage.as_str()))
             .count()
     };
-    let by_stage = STAGES
+    let stages = store.stages();
+    let mut by_stage: Vec<(String, usize)> = stages
+        .all
         .iter()
-        .map(|s| (s.to_string(), count(&[s])))
+        .map(|s| (s.clone(), count(&[s.as_str()])))
         .collect();
+    // Stages found in the data that are no longer configured stay visible.
+    let mut legacy: Vec<&str> = rows
+        .iter()
+        .map(|a| a.stage.as_str())
+        .filter(|s| !stages.contains(s))
+        .collect();
+    legacy.sort_unstable();
+    legacy.dedup();
+    by_stage.extend(
+        legacy
+            .into_iter()
+            .map(|s| (format!("{s} (not configured)"), count(&[s]))),
+    );
     let mut q = store.0.prepare(
         "SELECT strftime('%Y-W%W', at) AS w, COUNT(*) FROM activity
          WHERE message LIKE 'Created application%' OR message LIKE 'Imported from CSV%'
@@ -45,8 +60,11 @@ pub fn compute(store: &Store) -> Result<Stats> {
         active,
         archived: rows.len() - active,
         by_stage,
-        submitted: rows.iter().filter(|a| a.stage != "Wishlist").count(),
-        advanced: count(&["Screening", "Interview", "Offer", "Accepted"]),
+        submitted: rows.iter().filter(|a| a.stage != stages.all[0]).count(),
+        advanced: rows
+            .iter()
+            .filter(|a| stages.advanced.contains(&a.stage))
+            .count(),
         weekly,
     })
 }
@@ -61,12 +79,19 @@ pub fn render(s: &Stats) -> String {
         s.total, s.active, s.archived
     );
     let max = s.by_stage.iter().map(|(_, n)| *n).max().unwrap_or(0);
+    let width = s
+        .by_stage
+        .iter()
+        .map(|(n, _)| n.chars().count())
+        .max()
+        .unwrap_or(10)
+        .max(10);
     for (stage, n) in &s.by_stage {
-        out += &format!("{stage:<10} {n:>3} {}\n", bar(*n, max));
+        out += &format!("{stage:<width$} {n:>3} {}\n", bar(*n, max));
     }
     if s.submitted > 0 {
         out += &format!(
-            "\nAdvanced past application: {} of {} submitted ({}%)\n(currently Screening, Interview, Offer or Accepted)\n",
+            "\nAdvanced past application: {} of {} submitted ({}%)\n(currently in one of the advanced stages)\n",
             s.advanced,
             s.submitted,
             s.advanced * 100 / s.submitted
@@ -118,8 +143,17 @@ pub fn load_sample(store: &mut Store, today: NaiveDate) -> Result<usize> {
             String::new(),
         ),
     ];
+    // Example stages are picked by position so they exist in any configured stage list.
+    let pick = |name: &str| match name {
+        "Wishlist" => 0,
+        "Applied" => 1,
+        "Screening" => 2,
+        _ => 3,
+    };
     for (company, role, stage, action, due) in &rows {
-        store.save(None, company, role, stage, action, due)?;
+        let all = &store.stages().all;
+        let stage = all[pick(stage).min(all.len() - 1)].clone();
+        store.save(None, company, role, &stage, action, due)?;
     }
     store.note(
         1,
@@ -145,6 +179,47 @@ mod tests {
         assert_eq!(st.weekly.iter().map(|(_, n)| n).sum::<usize>(), 4);
         let text = render(&st);
         assert!(text.contains("2 of 3 submitted (66%)") && text.contains("Interview"));
+        Ok(())
+    }
+
+    #[test]
+    fn stats_use_configured_stages_and_show_leftovers() -> Result<()> {
+        let mut s = Store::initialize(rusqlite::Connection::open_in_memory()?)?;
+        s.save(None, "A", "R", "Applied", "", "")?; // will become a leftover
+        s.save(None, "B", "R", "Interview", "", "")?;
+        let custom = crate::config::Config::parse(
+            "stages = [\"Idea\", \"Sent\", \"Call\", \"Hired\"]\ndefault_stage = \"Sent\"",
+        )?
+        .stages()?;
+        s.set_stages(custom);
+        s.save(None, "C", "R", "Call", "", "")?;
+        let st = compute(&s)?;
+        let names: Vec<_> = st.by_stage.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Idea",
+                "Sent",
+                "Call",
+                "Hired",
+                "Applied (not configured)",
+                "Interview (not configured)"
+            ]
+        );
+        assert_eq!((st.submitted, st.advanced), (3, 1)); // only "Call" is configured as advanced
+        // The sample data adapts to the configured list.
+        let mut fresh = Store::initialize(rusqlite::Connection::open_in_memory()?)?;
+        fresh.set_stages(s.stages().clone());
+        assert_eq!(
+            load_sample(&mut fresh, NaiveDate::from_ymd_opt(2026, 11, 17).unwrap())?,
+            4
+        );
+        assert!(
+            fresh
+                .list(false)?
+                .iter()
+                .all(|a| fresh.stages().contains(&a.stage))
+        );
         Ok(())
     }
 }

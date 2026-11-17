@@ -77,7 +77,7 @@ jobi status                                   # "1 overdue · 2 due today · 5 o
 | `a` / `e` | Add / edit an application |
 | `n` | Add a dated note (`Ctrl+E` to write it in your editor) |
 | `x` | Complete the next action |
-| `s` / `S` | Move to the next / previous stage |
+| `s` / `S` | Move to the next / previous stage in your configured list |
 | `u` | Undo the last `x`, `s`, `S`, or archive change |
 | `z` | Archive / restore (asks for confirmation) |
 | `p` `i` `d` | Job posting, interview, linked document |
@@ -146,6 +146,7 @@ jobi offers                               # compare all offers
 | `done`, `note`, `history`, `archive [--restore]` | Work on one application |
 | `status [--quiet] [-v]`, `notify` | Summary line (optionally with the due actions); desktop notification |
 | `stats` | Stage counts, advancement rate, applications added per week |
+| `stages` | Configured stages, their roles, and how many applications are in each |
 | `posting`, `interview`, `interviews`, `interview-edit`, `interview-remove` | Interview preparation |
 | `attach`, `documents`, `unlink` | Documents |
 | `task`, `contact`, `offer`, `offers` | Checklist, people, offers |
@@ -193,7 +194,15 @@ theme            = "dark"            # dark | light | mono
 stale_days       = 14
 follow_up_days   = 7
 auto_follow_up   = true
+
+# Optional: your own stages. Order matters; the first means "not applied yet".
+stages        = ["Idea", "Sent", "Call", "Onsite", "Offer", "Hired", "Declined"]
+closed_stages = ["Declined"]   # finished outcomes: shown as closed, never stale
 ```
+
+**Custom stages.** Without `stages` you get Wishlist, Applied, Screening, Interview, Offer, Accepted, Rejected, Withdrawn. With it, `default_stage` must be one of yours, and stage names are matched ignoring case. Everything that depends on a stage's meaning is derived unless you set it: `closed_stages` defaults to any stage named Rejected or Withdrawn; `stale_stages` (where inactivity is flagged) to every stage after the first that is not closed, except the last open one (the final outcome); `advanced_stages` (progress in statistics) to the third stage onwards that is not closed; `follow_up_stage` (where new applications get the automatic follow-up) to the second stage. Set any of them explicitly with stage names from your list. `jobi stages` shows the result and how many applications sit in each.
+
+Changing stages never rewrites your data. Applications whose stage is no longer in the list keep it: they are flagged "not one of your configured stages", still open and editable, and listed as `(not configured)` in `jobi stats`; you can move them to a configured stage with `e`, but not to another unknown one. Restoring a backup accepts any stage name, because the data predates your configuration; CSV import accepts only configured stages and lists them in the error.
 
 ## Where your data lives
 

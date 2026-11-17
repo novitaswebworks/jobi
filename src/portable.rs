@@ -1,6 +1,7 @@
 //! CSV import/export and complete JSON backup/restore.
 use crate::extras::Offer;
-use crate::store::{Store, validate_app, validate_interview};
+use crate::stages::Stages;
+use crate::store::{Store, validate_fields, validate_interview};
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use rusqlite::params;
@@ -93,7 +94,11 @@ fn parse_bool(v: &str) -> Result<bool> {
 
 /// Parses and validates the whole file without touching the database.
 /// Returns valid rows and one message per problem (`line N: ...`).
-pub fn parse_csv(path: &Path) -> Result<(Vec<ImportRow>, Vec<String>)> {
+pub fn parse_csv(
+    path: &Path,
+    stages: &Stages,
+    default_stage: &str,
+) -> Result<(Vec<ImportRow>, Vec<String>)> {
     let mut rdr = csv::ReaderBuilder::new()
         .flexible(true)
         .from_path(path)
@@ -151,11 +156,18 @@ pub fn parse_csv(path: &Path) -> Result<(Vec<ImportRow>, Vec<String>)> {
             description: get("posting_description"),
         };
         if row.stage.is_empty() {
-            row.stage = "Applied".into();
+            row.stage = default_stage.into();
         }
         let checked = parse_bool(&get("archived"))
             .map(|a| row.archived = a)
-            .and_then(|_| validate_app(&row.company, &row.role, &row.stage, &row.action, &row.due));
+            .and_then(|_| match stages.canonical(&row.stage) {
+                Some(s) => {
+                    row.stage = s.to_string();
+                    Ok(())
+                }
+                None => stages.check(&row.stage),
+            })
+            .and_then(|_| validate_fields(&row.company, &row.role, &row.action, &row.due));
         match checked {
             Ok(()) => rows.push(row),
             Err(e) => errors.push(format!("line {line}: {e}")),
@@ -547,7 +559,11 @@ pub fn restore(store: &mut Store, path: &Path, merge: bool) -> Result<RestoreRep
         );
     }
     for a in &b.applications {
-        validate_app(&a.company, &a.role, &a.stage, &a.action, &a.due)
+        // Restoring is lenient about stage names: they may predate the current configuration.
+        if a.stage.trim().is_empty() {
+            bail!("application #{}: empty stage", a.id);
+        }
+        validate_fields(&a.company, &a.role, &a.action, &a.due)
             .with_context(|| format!("application #{}", a.id))?;
     }
     for i in &b.interviews {
@@ -703,7 +719,7 @@ mod tests {
             &p,
             "company,role,stage,due\nAcme,Eng,Applied,\nBad,Eng,Nope,\nX,Y,Applied,2026-02-30\n\"Q, Inc\",Dev,,\n",
         )?;
-        let (rows, errors) = parse_csv(&p)?;
+        let (rows, errors) = parse_csv(&p, &Stages::default(), "Applied")?;
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].company, "Q, Inc");
         assert_eq!(rows[1].stage, "Applied");
@@ -733,7 +749,7 @@ mod tests {
             &p,
             "company,role\n  ACME ,eng\nOld,Dev\nNew,Role\nnew,  role\nOther,Role\n",
         )?;
-        let (rows, errors) = parse_csv(&p)?;
+        let (rows, errors) = parse_csv(&p, &Stages::default(), "Applied")?;
         assert!(errors.is_empty());
         let (fresh, dups) = split_duplicates(&s, rows)?;
         assert_eq!(
@@ -755,9 +771,9 @@ mod tests {
     fn csv_rejects_bad_headers() -> Result<()> {
         let p = tmp("hdr.csv");
         fs::write(&p, "company,rol\nA,B\n")?;
-        assert!(parse_csv(&p).is_err());
+        assert!(parse_csv(&p, &Stages::default(), "Applied").is_err());
         fs::write(&p, "company,role,extra\nA,B,C\n")?;
-        assert!(parse_csv(&p).is_err());
+        assert!(parse_csv(&p, &Stages::default(), "Applied").is_err());
         fs::remove_file(p)?;
         Ok(())
     }
@@ -770,7 +786,7 @@ mod tests {
         let p = tmp("rt.csv");
         assert_eq!(export_csv(&a, &p, false)?, 1);
         assert!(export_csv(&a, &p, false).is_err());
-        let (rows, errors) = parse_csv(&p)?;
+        let (rows, errors) = parse_csv(&p, &Stages::default(), "Applied")?;
         assert!(errors.is_empty());
         let mut b = mem();
         import_rows(&mut b, &rows)?;
@@ -992,6 +1008,39 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn csv_stage_names_follow_configuration_and_restore_stays_lenient() -> Result<()> {
+        let stages = crate::config::Config::parse(
+            "stages = [\"Idea\", \"Sent\", \"Call\"]\ndefault_stage = \"Sent\"",
+        )?
+        .stages()?;
+        let p = tmp("stages.csv");
+        fs::write(&p, "company,role,stage\nA,R,call\nB,R,\nC,R,Applied\n")?;
+        let (rows, errors) = parse_csv(&p, &stages, "Sent")?;
+        assert_eq!(
+            rows.iter().map(|r| r.stage.as_str()).collect::<Vec<_>>(),
+            ["Call", "Sent"]
+        );
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0].starts_with("line 4:") && errors[0].contains("Idea, Sent, Call"),
+            "{errors:?}"
+        );
+        fs::remove_file(&p)?;
+
+        // A backup made under other stages restores into a store with different ones.
+        let mut a = mem();
+        a.save(None, "Old", "Dev", "Interview", "", "")?;
+        let b = tmp("legacy.json");
+        backup(&a, &b, true, false)?;
+        let mut other = mem();
+        other.set_stages(stages);
+        assert_eq!(restore(&mut other, &b, false)?.restored, 1);
+        assert_eq!(other.list(false)?[0].stage, "Interview");
+        fs::remove_file(b)?;
+        Ok(())
+    }
+
     mod props {
         use super::*;
         use proptest::prelude::*;
@@ -1012,7 +1061,7 @@ mod tests {
                 a.save_posting(id, "https://x", &desc).unwrap();
                 let p = tmp(&format!("prop-{}.csv", fastrand_name(&company, &role, &desc)));
                 export_csv(&a, &p, true).unwrap();
-                let (rows, errors) = parse_csv(&p).unwrap();
+                let (rows, errors) = parse_csv(&p, &Stages::default(), "Applied").unwrap();
                 fs::remove_file(&p).unwrap();
                 prop_assert!(errors.is_empty(), "{errors:?}");
                 prop_assert_eq!(rows.len(), 1);

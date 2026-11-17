@@ -7,6 +7,9 @@ All notable changes to Jobi are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- Configurable stages: `stages`, `closed_stages`, `stale_stages`, `advanced_stages` and
+  `follow_up_stage` in `config.toml`, with derived defaults, `jobi stages`, and graceful handling
+  of applications whose stage is no longer configured. Stage names match ignoring case.
 - `backup --include-documents` embeds private document copies; restore writes them back
   next to the destination database (only the file name from the backup is used).
 - `jobi status -v` and `jobi notify` name the overdue and due-today actions; `status --json`

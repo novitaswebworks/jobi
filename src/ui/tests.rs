@@ -24,7 +24,7 @@ fn layouts_and_form_render_at_supported_sizes() -> Result<()> {
     use ratatui::backend::TestBackend;
     for (width, height) in [(110, 32), (50, 18), (30, 10)] {
         let mut terminal = Terminal::new(TestBackend::new(width, height))?;
-        let store = Store(rusqlite::Connection::open_in_memory()?);
+        let store = Store(rusqlite::Connection::open_in_memory()?, Stages::default());
         let mut app = App::new(&Config::default(), Mode::Browse);
         terminal.draw(|f| draw(f, &app, &store))?;
         let content: String = terminal
@@ -398,4 +398,66 @@ fn mouse_click_selects_and_wheel_scrolls_and_note_editor_flag() -> Result<()> {
     )?;
     assert!(app.editor);
     Ok(())
+}
+
+#[test]
+fn custom_stages_drive_the_pipeline_keys_and_legacy_handling() -> Result<()> {
+    use ratatui::backend::TestBackend;
+    let config = Config::parse(
+        "stages = [\"Idea\", \"Sent\", \"Call\", \"Hired\", \"Declined\"]\nclosed_stages = [\"Declined\"]\ndefault_stage = \"Sent\"",
+    )?;
+    let mut store = Store::initialize(rusqlite::Connection::open_in_memory()?)?;
+    // Created under the default stages, before the custom ones were configured.
+    let legacy = store.save(None, "Old", "Dev", "Applied", "Call", "2099-01-02")?;
+    store.set_stages(config.stages()?);
+    let id = store.save(None, "Acme", "Eng", "Sent", "Call", "2099-01-01")?;
+    let mut app = App::new(&config, Mode::Browse);
+    app.refresh(&store)?;
+    let mut t = Terminal::new(TestBackend::new(120, 34))?;
+    t.draw(|f| draw(f, &app, &store))?;
+    let out = text(&t);
+    assert!(
+        out.contains("Idea") && out.contains("[Sent]") && out.contains("Hired"),
+        "{out}"
+    );
+    assert!(!out.contains("Wishlist") && !out.contains("Screening"));
+    // s walks the configured list, then stops, and Declined is reachable but not in the bar.
+    press(&mut app, &mut store, KeyCode::Char('s'));
+    assert_eq!(stage_of(&store, id), "Call");
+    // (The run loop refreshes after every key; the test does it by hand.)
+    for _ in 0..2 {
+        app.refresh(&store)?;
+        press(&mut app, &mut store, KeyCode::Char('s'));
+    }
+    assert_eq!(stage_of(&store, id), "Declined");
+    app.refresh(&store)?;
+    t.draw(|f| draw(f, &app, &store))?;
+    assert!(text(&t).contains("(closed)"));
+    press(&mut app, &mut store, KeyCode::Char('s'));
+    assert!(app.status.contains("No further stage"), "{}", app.status);
+    // A leftover stage is flagged and `s` refuses to guess.
+    app.selected = app.rows.iter().position(|a| a.id == legacy).unwrap();
+    app.refresh(&store)?;
+    t.draw(|f| draw(f, &app, &store))?;
+    assert!(text(&t).contains("not one of your configured stages"));
+    press(&mut app, &mut store, KeyCode::Char('s'));
+    assert!(app.status.contains("not one of your configured stages"));
+    assert_eq!(stage_of(&store, legacy), "Applied");
+    // The add form starts on the configured default and cycles through the configured list.
+    press(&mut app, &mut store, KeyCode::Char('a'));
+    assert!(matches!(&app.mode, Mode::Form(f) if f.values[2] == "Sent"));
+    press(&mut app, &mut store, KeyCode::Tab);
+    press(&mut app, &mut store, KeyCode::Tab);
+    press(&mut app, &mut store, KeyCode::Right);
+    assert!(matches!(&app.mode, Mode::Form(f) if f.values[2] == "Call"));
+    Ok(())
+}
+fn stage_of(store: &Store, id: i64) -> String {
+    store
+        .list(false)
+        .unwrap()
+        .into_iter()
+        .find(|a| a.id == id)
+        .unwrap()
+        .stage
 }

@@ -112,7 +112,7 @@ pub(super) fn draw(f: &mut Frame, app: &App, store: &Store) {
             (a.due.clone(), pal.dim())
         };
         let mut second = vec![
-            Span::styled(a.stage.clone(), pal.stage(&a.stage)),
+            Span::styled(a.stage.clone(), pal.stage_in(&app.stages, &a.stage)),
             Span::styled("  |  ", pal.dim()),
             Span::styled(due, due_style),
         ];
@@ -158,7 +158,7 @@ pub(super) fn draw(f: &mut Frame, app: &App, store: &Store) {
             Line::from(Span::styled(a.company.clone(), Style::new().bold())),
             Line::from(a.role.clone()),
             Line::from(""),
-            pipeline(&pal, &a.stage),
+            pipeline(&pal, &app.stages, &a.stage),
             Line::from(format!(
                 "Next action: {}",
                 if a.action.is_empty() {
@@ -529,13 +529,18 @@ fn popup(f: &mut Frame, width: u16, height: u16) -> Rect {
     r
 }
 
-/// "Wishlist › Applied › [Screening] › ..." with the current stage highlighted.
-fn pipeline(pal: &super::theme::Palette, stage: &str) -> Line<'static> {
-    let main = &STAGES[..6];
+/// "Idea › Sent › [Call] › ..." with the current stage highlighted.
+fn pipeline(pal: &super::theme::Palette, stages: &Stages, stage: &str) -> Line<'static> {
+    let main = stages.pipeline();
     let Some(at) = main.iter().position(|s| *s == stage) else {
+        let note = if stages.is_closed(stage) {
+            "  (closed)"
+        } else {
+            "  (not one of your configured stages)"
+        };
         return Line::from(vec![
-            Span::styled(format!("● {stage}"), pal.stage(stage).bold()),
-            Span::styled("  (closed)", pal.dim()),
+            Span::styled(format!("● {stage}"), pal.stage_in(stages, stage).bold()),
+            Span::styled(note, pal.dim()),
         ]);
     };
     let mut spans = vec![];
@@ -544,7 +549,7 @@ fn pipeline(pal: &super::theme::Palette, stage: &str) -> Line<'static> {
             spans.push(Span::styled(" › ", pal.dim()));
         }
         spans.push(if i == at {
-            Span::styled(format!("[{name}]"), pal.stage(stage).bold())
+            Span::styled(format!("[{name}]"), pal.stage_in(stages, stage).bold())
         } else {
             Span::styled(name.to_string(), pal.dim())
         });

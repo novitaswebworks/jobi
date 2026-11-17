@@ -1,7 +1,8 @@
 use crate::config::Config;
 use crate::dates::resolve_due;
 use crate::extras::{Contact, Offer, Task};
-use crate::store::{Application, Document, Interview, STAGES, Store, due_counts};
+use crate::stages::Stages;
+use crate::store::{Application, Document, Interview, Store, due_counts};
 use anyhow::{Context, Result, bail};
 use chrono::Local;
 use crossterm::event::{
@@ -250,6 +251,7 @@ struct App {
     status: String,
     config: Config,
     pal: Palette,
+    stages: Stages,
     /// open actions past due / due today across all active applications
     overdue: usize,
     due_today: usize,
@@ -280,6 +282,7 @@ impl App {
             status: String::new(),
             config: config.clone(),
             pal: Palette::new(config),
+            stages: config.stages().unwrap_or_default(),
             overdue: 0,
             due_today: 0,
             undo: None,

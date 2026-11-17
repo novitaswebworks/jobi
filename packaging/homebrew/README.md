@@ -3,8 +3,8 @@
 `jobi.rb` is the formula. Homebrew installs from a *tap*, a GitHub repository named
 `homebrew-<name>`. For `brew install novitaswebworks/tap/jobi` to work:
 
-1. The `jobi` repository must be public (Homebrew clones the tagged source and builds it).
-2. Create a public repository `novitaswebworks/homebrew-tap` and copy this file to
+1. The `jobi` repository must be public (Homebrew downloads the release archives from it).
+2. Use the public repository `novitaswebworks/homebrew-tap` and copy this file to
    `Formula/jobi.rb` in it.
 
 ```sh
@@ -17,12 +17,17 @@ git add Formula && git commit -m "jobi 0.2.0" && git push
 Users then run:
 
 ```sh
-brew install novitaswebworks/tap/jobi        # taps automatically, builds from source
-brew install --HEAD novitaswebworks/tap/jobi # latest main instead of the tagged release
+brew install novitaswebworks/tap/jobi        # taps automatically; installs a prebuilt binary where one exists
+brew install --HEAD novitaswebworks/tap/jobi # builds latest main from source (needs Rust)
 ```
 
 ## Releasing a new version
 
-After tagging `vX.Y.Z`, set `tag:` to it and `revision:` to the commit it points at
-(`git ls-remote https://github.com/novitaswebworks/jobi vX.Y.Z`), copy the file to the tap, and push.
-Check it with `brew install --build-from-source --verbose novitaswebworks/tap/jobi && brew test jobi`.
+After the release workflow has attached the archives for `vX.Y.Z`, replace the version in the
+URLs and the SHA-256 values (each archive has a `.sha256` file on the release page; the source
+archive hash is `curl -L https://github.com/novitaswebworks/jobi/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256`),
+copy the file to the tap, and push. Check with `brew audit --strict --formula novitaswebworks/tap/jobi`,
+`brew reinstall novitaswebworks/tap/jobi` and `brew test jobi`.
+
+v0.2.0 shipped prebuilt binaries for macOS arm64 and Linux x86_64 only, so macOS Intel and Linux arm64 build
+from source. From the next release the workflow also builds macOS x86_64; add an `on_intel` URL for it.

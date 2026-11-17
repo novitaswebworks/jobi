@@ -19,6 +19,8 @@ All notable changes to Jobi are recorded here. The format follows
 - `install.sh`: checksum-verified installer for Linux x86_64, macOS arm64 and macOS x86_64.
 - Homebrew formula and tap instructions in `packaging/homebrew`.
 - Release archives for macOS x86_64, and a LICENSE file inside every archive.
+- The Homebrew formula installs prebuilt release binaries (about 4 MB, no dependencies) on
+  Apple silicon and Linux x86_64, and builds from source elsewhere.
 
 ## [0.2.0] - 2026-11-17
 

@@ -23,7 +23,49 @@ pub struct Application {
     pub due: String,
     pub archived: bool,
 }
-const SCHEMA_VERSION: i64 = 2;
+/// Schema history. Entry N-1 upgrades a database from version N-1 to N and must only
+/// ever be appended to: released entries are never edited.
+const MIGRATIONS: &[&str] = &[
+    // 1: original schema
+    "CREATE TABLE IF NOT EXISTS applications (
+       id INTEGER PRIMARY KEY, company TEXT NOT NULL, role TEXT NOT NULL,
+       stage TEXT NOT NULL DEFAULT 'Wishlist', action TEXT NOT NULL DEFAULT '',
+       due TEXT NOT NULL DEFAULT '', archived INTEGER NOT NULL DEFAULT 0);
+     CREATE TABLE IF NOT EXISTS activity (
+       id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL REFERENCES applications(id),
+       at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S','now')), message TEXT NOT NULL);",
+    // 2: interview preparation
+    "CREATE TABLE IF NOT EXISTS interviews (
+       id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+       starts_at TEXT NOT NULL, timezone TEXT NOT NULL, kind TEXT NOT NULL DEFAULT '',
+       meeting_url TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '');
+     CREATE TABLE IF NOT EXISTS documents (
+       id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+       label TEXT NOT NULL, path TEXT NOT NULL, managed INTEGER NOT NULL DEFAULT 0);
+     CREATE TABLE IF NOT EXISTS postings (
+       application_id INTEGER PRIMARY KEY REFERENCES applications(id) ON DELETE CASCADE,
+       url TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '');",
+];
+/// Upgrades `db` to `target`, one transactional step per version. Refuses databases
+/// written by a newer Jobi instead of silently downgrading them.
+fn migrate(db: &Connection, target: usize) -> Result<()> {
+    let found: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if found > MIGRATIONS.len() as i64 {
+        bail!(
+            "This database was created by a newer Jobi (schema {found}, this build supports {}). Upgrade Jobi instead of opening it with this version.",
+            MIGRATIONS.len()
+        );
+    }
+    let from = found.max(0) as usize;
+    for (v, sql) in MIGRATIONS.iter().enumerate().take(target).skip(from) {
+        let tx = db.unchecked_transaction()?;
+        tx.execute_batch(sql)
+            .with_context(|| format!("Upgrading database to schema {}", v + 1))?;
+        tx.execute_batch(&format!("PRAGMA user_version={}", v + 1))?;
+        tx.commit()?;
+    }
+    Ok(())
+}
 pub struct Store(pub Connection);
 #[derive(Debug, Clone, PartialEq)]
 pub struct Interview {
@@ -67,32 +109,8 @@ impl Store {
     }
     pub(crate) fn initialize(db: Connection) -> Result<Self> {
         db.busy_timeout(std::time::Duration::from_secs(5))?;
-        // Never silently downgrade a database written by a newer Jobi.
-        let found: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if found > SCHEMA_VERSION {
-            bail!(
-                "This database was created by a newer Jobi (schema {found}, this build supports {SCHEMA_VERSION}). Upgrade Jobi instead of opening it with this version."
-            );
-        }
-        db.execute_batch("PRAGMA foreign_keys=ON;
-            CREATE TABLE IF NOT EXISTS applications (
-              id INTEGER PRIMARY KEY, company TEXT NOT NULL, role TEXT NOT NULL,
-              stage TEXT NOT NULL DEFAULT 'Wishlist', action TEXT NOT NULL DEFAULT '',
-              due TEXT NOT NULL DEFAULT '', archived INTEGER NOT NULL DEFAULT 0);
-            CREATE TABLE IF NOT EXISTS activity (
-              id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL REFERENCES applications(id),
-              at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S','now')), message TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS interviews (
-              id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
-              starts_at TEXT NOT NULL, timezone TEXT NOT NULL, kind TEXT NOT NULL DEFAULT '',
-              meeting_url TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '');
-            CREATE TABLE IF NOT EXISTS documents (
-              id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
-              label TEXT NOT NULL, path TEXT NOT NULL, managed INTEGER NOT NULL DEFAULT 0);
-            CREATE TABLE IF NOT EXISTS postings (
-              application_id INTEGER PRIMARY KEY REFERENCES applications(id) ON DELETE CASCADE,
-              url TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '');
-            PRAGMA user_version=2;")?; // keep equal to SCHEMA_VERSION
+        db.execute_batch("PRAGMA foreign_keys=ON;")?;
+        migrate(&db, MIGRATIONS.len())?;
         Ok(Self(db))
     }
     fn require_app(&self, id: i64) -> Result<()> {
@@ -422,6 +440,28 @@ mod tests {
         s.delete_document(d.id)?;
         assert!(s.documents(id)?.is_empty());
         assert!(s.delete_document(d.id).is_err());
+        Ok(())
+    }
+    #[test]
+    fn upgrades_from_every_older_schema_keep_data() -> Result<()> {
+        for old in 1..MIGRATIONS.len() {
+            let db = Connection::open_in_memory()?;
+            db.execute_batch("PRAGMA foreign_keys=ON;")?;
+            migrate(&db, old)?;
+            db.execute_batch(
+                "INSERT INTO applications(company,role,stage) VALUES('Old','Dev','Applied');
+                 INSERT INTO activity(application_id,at,message) VALUES(1,'2026-01-02 03:04:05','kept');",
+            )?;
+            let s = Store::initialize(db)?;
+            let v: i64 = s.0.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+            assert_eq!(v, MIGRATIONS.len() as i64, "from v{old}");
+            assert_eq!(s.list(false)?[0].company, "Old");
+            assert!(s.history(1)?[0].contains("kept"));
+            s.save_posting(1, "https://x", "d")?; // new tables are usable
+        }
+        // Re-opening an up-to-date database changes nothing.
+        let s = Store::initialize(Connection::open_in_memory()?)?;
+        migrate(&s.0, MIGRATIONS.len())?;
         Ok(())
     }
     #[test]
